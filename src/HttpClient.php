@@ -113,8 +113,9 @@ final class HttpClient
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
             CURLOPT_NOPROGRESS => false,
-            // Returning non-zero aborts the transfer
-            CURLOPT_XFERINFOFUNCTION => static fn ($ch, $total, $done) => $done > $maxBytes || $total > $maxBytes ? 1 : 0,
+            // Returning non-zero aborts the transfer. CURLOPT_PROGRESSFUNCTION rather than
+            // CURLOPT_XFERINFOFUNCTION, which PHP only has from 8.2.
+            CURLOPT_PROGRESSFUNCTION => static fn ($ch, $total, $done) => $done > $maxBytes || $total > $maxBytes ? 1 : 0,
         ]);
         $ok = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
