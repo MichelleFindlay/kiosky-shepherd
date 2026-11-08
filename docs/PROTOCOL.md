@@ -263,6 +263,7 @@ success.
 
   "updates": {
     "source": "server",
+    "channel": "stable",
     "release": "latest",
     "auto_install": true,
     "check_hours": 12
@@ -348,8 +349,13 @@ that strengthen a partial lockdown.
 | `updates.source` | Behaviour |
 | --- | --- |
 | `server` | Use the `update` object from check-in. Do **not** contact GitHub. |
-| `github` | Kiosky's existing `Updater.check()` against GitHub, every `check_hours`. |
+| `github` | Kiosky's existing `Updater.check()` against GitHub, every `check_hours`. When `channel` is `dev`, also consider GitHub releases marked as pre-releases (newest version wins); when `stable`, ignore them. |
 | `off` | Never check, never install. |
+
+`channel` (`stable` or `dev`, added in server 1.5.0) is resolved by the server for
+the `server` source: the `update` object already is the right build, and its
+`channel` field says which kind it is (show "dev build" next to the version in the
+PIN-unlocked toolbar if you like). Apps that don't know the key can ignore it.
 
 For `server`:
 

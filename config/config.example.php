@@ -104,6 +104,17 @@ return [
     // While someone has a device's page open, it is asked to check in this often (10–60 s)
     'fast_checkin_seconds' => 15,
 
+    // ---- Updating Kiosky Shepherd from the console ---------------------------
+    // Admins see new releases from GitHub under Server, with an Install button.
+    // PHP needs write access to the project files, plus the curl and zip extensions.
+    'self_update' => [
+        'enabled' => true,       // false: only report new versions, never install from the console
+        'auto' => false,         // true: bin/cron.php installs new stable releases by itself
+        'prereleases' => false,  // also offer pre-release versions such as 1.6.0-beta.1
+        // 'repo' => 'MichelleFindlay/kiosky-shepherd',
+        // 'github_token' => '', // only if GitHub rate-limits your server's IP address
+    ],
+
     // ---- Offline alerts (optional) -------------------------------------------
     // bin/cron.php sends one message when devices go offline and one when they
     // come back. Use any mix of email and webhooks; the Overview page has a

@@ -253,6 +253,28 @@ expect($admin, 204, 'DELETE', "$A/releases/rings/canary");
 $pol = expect($admin, 200, 'GET', "$A/devices/$id/policy");
 check($pol['sources']['updates.release'] === 'default', 'removing the ring returns the device to its profile');
 
+// ---- Release channels (needs the two releases the CI workflow seeds) --------------
+$rels = expect($admin, 200, 'GET', "$A/releases");
+$byName = array_column($rels, null, 'version_name');
+if (isset($byName['1.0.0'], $byName['1.1.0-dev.1'])) {
+    check($byName['1.1.0-dev.1']['channel'] === 'dev', 'releases report their channel');
+    $pol = expect($admin, 200, 'GET', "$A/devices/$id/policy");
+    check(($pol['update']['version'] ?? null) === '1.0.0', 'the stable channel gets the newest stable release', $pol['update']);
+    expect($admin, 422, 'PATCH', "$A/devices/$id", ['overrides' => ['updates.channel' => 'beta']]);
+    expect($admin, 200, 'PATCH', "$A/devices/$id", ['overrides' => ['updates.channel' => 'dev']]);
+    $ci = expect($device, 200, 'POST', "$D/checkin", []);
+    check(($ci['update']['version'] ?? null) === '1.1.0-dev.1' && $ci['update']['channel'] === 'dev', 'the dev channel gets the dev build', $ci['update']);
+    check(($ci['policy']['updates']['channel'] ?? null) === 'dev', 'the device is told its channel');
+    expect($admin, 200, 'PATCH', "$A/devices/$id", ['overrides' => ['updates.channel' => null]]);
+    expect($admin, 422, 'PATCH', "$A/releases/{$byName['1.1.0-dev.1']['id']}", ['channel' => 'beta']);
+    expect($admin, 200, 'PATCH', "$A/releases/{$byName['1.1.0-dev.1']['id']}", ['channel' => 'stable']);
+    $pol = expect($admin, 200, 'GET', "$A/devices/$id/policy");
+    check(($pol['update']['version'] ?? null) === '1.1.0-dev.1', 'a promoted build reaches the stable channel', $pol['update']);
+    expect($admin, 200, 'PATCH', "$A/releases/{$byName['1.1.0-dev.1']['id']}", ['channel' => 'dev']);
+} else {
+    echo "skip - release channel checks (no seeded releases)\n";
+}
+
 // ---- Health history ---------------------------------------------------------------
 $hh = expect($admin, 200, 'GET', "$A/devices/$id/history?days=7");
 $today = end($hh['days']);
@@ -307,6 +329,14 @@ $api = new Client($base);
 $api->bearer = $t['token'];
 expect($api, 200, 'GET', "$A/overview");
 expect($api, 403, 'POST', "$A/profiles", ['name' => 'nope']);
+
+// ---- Self-update (no GitHub calls: the CI checkout is a git clone, which it refuses to overwrite)
+expect($api, 403, 'GET', "$A/system/update");
+$su = expect($admin, 200, 'GET', "$A/system/update");
+check($su['current'] === $h['version'] && is_array($su['problems']) && is_array($su['backups']), 'update status reports the installed version', $su);
+$inst = $admin->call('POST', "$A/system/update/install", ['version' => '99.0.0']);
+check($inst['status'] === 409, 'installing refuses when it can\'t safely update', $inst['body']);
+expect($admin, 404, 'POST', "$A/system/update/rollback", ['backup' => '../../config/config.php']);
 
 // ---- Two-factor sign-in -----------------------------------------------------------
 $setup = expect($admin, 200, 'POST', "$A/session/2fa/setup");

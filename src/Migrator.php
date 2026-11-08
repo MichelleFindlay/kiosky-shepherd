@@ -27,6 +27,19 @@ final class Migrator
         return self::$has[$table] ??= self::tableExists($table);
     }
 
+    /** @var array<string, bool> per-request cache for hasColumn() */
+    private static array $hasColumn = [];
+
+    /** Like has(), for a column a migration adds to an existing table. */
+    public static function hasColumn(string $table, string $column): bool
+    {
+        return self::$hasColumn["$table.$column"] ??= Db::value(
+            'SELECT COUNT(*) FROM information_schema.columns
+              WHERE table_schema = DATABASE() AND table_name = :t AND column_name = :c',
+            ['t' => $table, 'c' => $column]
+        ) > 0;
+    }
+
     /** Throws a clear 409 when a feature's table hasn't been created yet. */
     public static function requireTable(string $table): void
     {
@@ -73,6 +86,7 @@ final class Migrator
             Db::run('INSERT IGNORE INTO schema_migrations (name) VALUES (:n)', ['n' => $name]);
             $done[] = $name;
             self::$has = [];
+            self::$hasColumn = [];
         }
         self::writeMarker(self::APPLIED_MARKER);
         @unlink(Config::storage(self::FAILED_MARKER));

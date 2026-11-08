@@ -34,6 +34,7 @@ final class Config
         // Lists inside 'alerts' get their defaults in Alerts, because
         // array_replace_recursive() can't replace a default list with an empty one
         'alerts' => [],
+        'self_update' => [],
     ];
 
     /** @var array<string, mixed> */

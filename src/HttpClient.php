@@ -79,6 +79,59 @@ final class HttpClient
         return ['status' => $status, 'body' => $resp];
     }
 
+    /**
+     * Downloads $url to $dest with curl, following redirects only over HTTPS and only
+     * to $allowedHosts, and aborting past $maxBytes. Used for Kiosky Shepherd's own
+     * updates (GitHub redirects archive downloads to codeload.github.com).
+     *
+     * @param list<string> $allowedHosts
+     * @param array<string, string> $headers
+     */
+    public static function download(string $url, string $dest, int $maxBytes, array $allowedHosts, array $headers = []): void
+    {
+        if (!function_exists('curl_init')) {
+            throw new \RuntimeException('Downloading updates needs the PHP curl extension.');
+        }
+        $fh = fopen($dest, 'wb');
+        if ($fh === false) {
+            throw new \RuntimeException("Cannot write $dest");
+        }
+        $lines = ['User-Agent: KioskyShepherd/' . SHEPHERD_VERSION];
+        foreach ($headers as $k => $v) {
+            $lines[] = "$k: $v";
+        }
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_FILE => $fh,
+            CURLOPT_HTTPHEADER => $lines,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+            CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS,
+            CURLOPT_CONNECTTIMEOUT => self::TIMEOUT,
+            CURLOPT_TIMEOUT => 300,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_NOPROGRESS => false,
+            // Returning non-zero aborts the transfer
+            CURLOPT_XFERINFOFUNCTION => static fn ($ch, $total, $done) => $done > $maxBytes || $total > $maxBytes ? 1 : 0,
+        ]);
+        $ok = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $finalHost = strtolower((string) parse_url((string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL), PHP_URL_HOST));
+        $err = curl_error($ch);
+        curl_close($ch);
+        fclose($fh);
+        if ($ok === false || $status < 200 || $status >= 300 || !in_array($finalHost, $allowedHosts, true)) {
+            @unlink($dest);
+            throw new \RuntimeException(match (true) {
+                $ok === false => "Download failed: $err",
+                !in_array($finalHost, $allowedHosts, true) => "The download was redirected to an unexpected host ($finalHost).",
+                default => "The download answered HTTP $status.",
+            });
+        }
+    }
+
     /** GET or POST that must return a JSON object with a 2xx status. */
     public static function json(string $method, string $url, array $headers = [], ?string $body = null): array
     {

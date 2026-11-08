@@ -17,8 +17,8 @@ locked down.
   profile at 22:00)
 - **Tags** for grouping devices across profiles, with filtering and bulk tagging
 - **Managed updates**: upload Kiosky APKs, roll out "latest" or pin a version per
-  profile, tag ("canary" first, then everyone) or device. The server reads each
-  APK's real version and package name.
+  profile, tag ("canary" first, then everyone) or device, with a **dev channel**
+  for test builds. The server reads each APK's real version and package name.
 - **Monitoring**: online status, current page, permissions, versions, event log,
   a screenshot gallery, **live view**, daily **health history** (uptime, battery,
   Wi-Fi) with charts, and **offline alerts** by email, Slack, Teams, Discord,
@@ -104,7 +104,10 @@ server {
     location ~ \.(md|sql|dist|neon|py)$ { deny all; return 404; }
     location = /hacs.json { deny all; return 404; }
 
-    location /admin/ { try_files $uri $uri/ =404; }
+    location /admin/ {
+        try_files $uri $uri/ =404;
+        location ~ \.(html|js|css)$ { add_header Cache-Control "no-cache"; try_files $uri =404; }
+    }
     location / { try_files $uri /index.php$is_args$args; }
     location = /index.php {
         include fastcgi_params;
@@ -121,6 +124,10 @@ so the server sees client IPs and HTTPS correctly.
 
 ### Upgrading
 
+From 1.5.0 on, admins can update from the console: **Server** lists the newest
+release from GitHub with its notes and an **Install** button (see
+[Updating from the console](#updating-from-the-console)). Otherwise, or to reach 1.5.0:
+
 Upload the new files over the old ones (keep `config/config.php` and `storage/`).
 If the new version changes the database, the first request afterwards (a console
 page, a tablet check-in or cron) applies the update automatically and records it
@@ -131,6 +138,10 @@ an **Update database** banner in the console; click it. With SSH you can run
 `php bin/migrate.php` instead, or import the new files from `sql/migrations/` in
 phpMyAdmin. The banner also appears if an automatic update fails; the reason is in
 the PHP error log, and it isn't retried automatically until you upload new files.
+
+**1.5.0** adds `sql/migrations/005_release_channels.sql` (applied automatically)
+and the **Release channel** policy setting, so device policies change once more.
+Existing releases become stable.
 
 **1.4.0** adds `sql/migrations/004_insights.sql` (applied automatically) and a
 `custom_components/` folder with its own `.htaccess`; upload both. It also adds
@@ -276,6 +287,58 @@ ring list shows how many are on it, and the release table how many devices each
 release is targeted at. When it looks good, move the profiles over and remove the
 ring. A device's own `updates.release` override still wins, and a device in
 several rings follows the newest release.
+
+## Updating from the console
+
+Cron checks GitHub for a newer Kiosky Shepherd every 6 hours, and admins then see
+an "update available" banner. **Server** shows the installed and newest versions,
+the release notes, and **Install**. Installing:
+
+1. downloads the release archive from the configured repository on GitHub (HTTPS,
+   GitHub's hosts only);
+2. checks it: no unsafe paths, the expected files present, and `src/bootstrap.php`
+   really is the version offered;
+3. zips the current files into `storage/backups/` (the last five are kept);
+4. writes the new files one at a time (each written aside, then renamed into
+   place), leaving `config/config.php`, `storage/` and `.user.ini` alone. If writing
+   fails part-way, the backup is put straight back;
+5. clears PHP's opcode cache. Database updates apply on the next page load.
+
+**Roll back** under **Server → Backups** restores an earlier version's files
+(database changes stay; older versions ignore what they don't know).
+
+It needs PHP's `curl` and `zip` extensions and write access to the project files,
+which most cPanel hosts give PHP. **Server** says plainly what's missing. Settings,
+under `self_update` in `config/config.php`:
+
+| Key | Default | |
+| --- | --- | --- |
+| `enabled` | `true` | `false` only reports new versions; the Install button is hidden |
+| `auto` | `false` | `true` lets `bin/cron.php` install new stable releases by itself |
+| `prereleases` | `false` | also offer versions such as `1.6.0-beta.1` |
+| `repo` | `MichelleFindlay/kiosky-shepherd` | where releases come from |
+| `github_token` | | only if GitHub rate-limits your server's IP address |
+
+Releases are GitHub releases, or plain version tags (`v1.5.0`) when there are none.
+A release must be tagged on a commit whose `src/bootstrap.php` has that version.
+Copies installed with git (a `.git` folder) refuse, and should use `git pull`.
+
+## Release channels
+
+Every uploaded APK is either **stable** or **dev** (chosen when uploading, and
+changed later with **Promote to stable** / **Move to dev**). The **Release channel**
+policy setting (`updates.channel`) decides what "latest" means for a device:
+
+- `stable` (default): the newest stable release.
+- `dev`: the newest release of either kind, so these tablets get test builds first.
+  A stable release newer than the last dev build still wins.
+
+Set it on a test profile, or as an override on a few devices. A pinned
+`updates.release` version is installed whatever its channel, and release rings
+pointing at "latest" follow each device's channel. On the `github` update source,
+`dev` asks Kiosky to include GitHub pre-releases (needs app support, see
+[docs/PROTOCOL.md](docs/PROTOCOL.md) §6). A typical flow: upload as dev, watch the dev tablets
+update and behave, then promote it.
 
 ## Health history
 
@@ -487,8 +550,8 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `GET/POST /api/v1/admin/enrollment-tokens` | operator | `{profile_id, label, name_prefix, expires_hours, max_uses}` |
 | `DELETE /api/v1/admin/enrollment-tokens/{id}` | operator | Revoke |
 | `GET /api/v1/admin/releases` | viewer | Uploaded APKs |
-| `POST /api/v1/admin/releases` | admin | multipart: `apk`, `notes` |
-| `PATCH/DELETE /api/v1/admin/releases/{id}` | admin | `{active, notes}` / delete |
+| `POST /api/v1/admin/releases` | admin | multipart: `apk`, `notes`, `channel` (`stable` or `dev`) |
+| `PATCH/DELETE /api/v1/admin/releases/{id}` | admin | `{active, notes, channel}` / delete |
 | `GET /api/v1/admin/releases/rings` | viewer | Release rings (staged rollouts) and their progress |
 | `PUT/DELETE /api/v1/admin/releases/rings/{tag}` | admin | `{release: "latest" \| "1.2.0"}` / remove |
 | `GET/POST/PATCH/DELETE /api/v1/admin/users[/{id}]` | admin | Console users. `PATCH {reset_2fa: true}` turns off someone's two-factor sign-in; `scope_tags: [..] \| null` limits a user to devices with those tags. |
@@ -497,6 +560,10 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `GET /api/v1/admin/login-options` | none | Whether password sign-in is on, and the single sign-on providers |
 | `POST /api/v1/admin/migrate` | admin | Apply pending database migrations; `GET …/session` lists them under `server.pending_migrations` |
 | `POST /api/v1/admin/alerts/test` | admin | Send a test message to every alert channel |
+| `GET /api/v1/admin/system/update` | admin | Installed version, last update check, what would stop an install, backups |
+| `POST /api/v1/admin/system/update/check` | admin | Check GitHub now |
+| `POST /api/v1/admin/system/update/install` | admin | `{version}`: install the newest release (must match the last check) |
+| `POST /api/v1/admin/system/update/rollback` | admin | `{backup}`: restore the files from a backup |
 | `POST /api/v1/admin/session/2fa[/setup\|/enable\|/disable\|/recovery]` | console only | Second sign-in step, and managing your own two-factor sign-in |
 
 Example: reload every tablet in profile 3.
@@ -518,6 +585,9 @@ The device API (`/api/v1/device/…`) is documented in [docs/PROTOCOL.md](docs/P
 - Logins, two-factor codes, enrollment and first-run setup are rate-limited per IP
   (and per user). Each device is limited to 120 check-ins and 300 command results
   per 10 minutes and 30 APK downloads an hour.
+- Updating from the console only downloads from the repository set in
+  `config/config.php` (never one chosen in the console), over HTTPS from GitHub's
+  hosts, and only admins can start it. Turn it off with `self_update.enabled`.
 - Two-factor sign-in uses standard TOTP (RFC 6238). Each code works once, and
   recovery codes are stored only as SHA-256 hashes. The TOTP secret itself has to
   be stored as it is, so protect database backups.

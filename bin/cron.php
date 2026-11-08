@@ -42,6 +42,14 @@ if (\Shepherd\Migrator::tableExists('scheduled_commands')) {
     $extra[] = 'database update pending: schedules and alerts are off';
 }
 
+// Checks GitHub for a newer Kiosky Shepherd every 6 hours (and installs it when self_update.auto is on)
+try {
+    $extra[] = \Shepherd\SelfUpdate::cron();
+} catch (\Throwable $e) {
+    error_log('[kiosky-shepherd] cron self-update: ' . $e->getMessage());
+    $extra[] = 'self-update failed: ' . $e->getMessage();
+}
+
 // Old finished commands, and their screenshots
 $old = Db::all("SELECT id, attachment FROM commands
                  WHERE status IN ('done', 'failed', 'expired', 'cancelled')

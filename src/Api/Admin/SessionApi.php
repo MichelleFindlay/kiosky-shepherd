@@ -209,6 +209,9 @@ final class SessionApi
         $server = ['version' => SHEPHERD_VERSION, 'cron' => OverviewApi::cronStatus()];
         if ($p->can('admin')) {
             $server['pending_migrations'] = Migrator::pending();
+            // From the last check only; the session never waits for GitHub
+            $u = \Shepherd\SelfUpdate::cached();
+            $server['update'] = $u === null ? null : ['latest' => $u['latest'] ?? null, 'available' => $u['available']];
         }
         $twoFactor = null;
         $recoveryLeft = null;

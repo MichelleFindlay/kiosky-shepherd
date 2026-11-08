@@ -31,6 +31,15 @@ jobs:
       - name: JavaScript syntax
         run: for f in admin/*.js; do node --check "$f"; done
 
+      - name: Version numbers agree
+        run: |
+          v=$(grep -oP "SHEPHERD_VERSION', '\K[^']+" src/bootstrap.php)
+          echo "Server version $v"
+          bad=$(grep -oP '\?v=\K[0-9.]+' admin/index.html | grep -vx "$v" || true)
+          [ -z "$bad" ] || { echo "admin/index.html still loads ?v=$bad; set it to $v so browsers fetch the new console" >&2; exit 1; }
+          grep -q "\"version\": \"$v\"" custom_components/kiosky_shepherd/manifest.json \
+            || { echo "custom_components/kiosky_shepherd/manifest.json version differs from $v" >&2; exit 1; }
+
       - name: PHPStan
         run: phpstan analyse --no-progress --memory-limit=1G
 
@@ -103,6 +112,11 @@ jobs:
 
       - name: Create an admin
         run: printf 'ci-password-123\n' | php bin/create-admin.php ci admin
+
+      - name: Seed a stable and a dev release for the channel checks
+        run: |
+          mysql -h127.0.0.1 -uroot -proot shepherd -e "INSERT INTO releases (version_name, version_code, sha256, size, file_name, channel)
+            VALUES ('1.0.0', 100, REPEAT('a', 64), 1, 'missing.apk', 'stable'), ('1.1.0-dev.1', 110, REPEAT('b', 64), 1, 'missing.apk', 'dev')"
 
       - name: Start the server
         run: |

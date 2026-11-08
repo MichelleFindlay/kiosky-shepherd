@@ -61,7 +61,7 @@ final class ReleasesApi
         if (!Migrator::has('tag_releases')) {
             return Response::json([]);
         }
-        $latest = Db::one('SELECT version_name, version_code FROM releases WHERE active = 1 ORDER BY version_code DESC LIMIT 1');
+        $latest = Releases::latest('stable'); // "latest" in a ring follows each device's channel; stable shown
         $out = [];
         foreach (Db::all('SELECT r.*, a.username FROM tag_releases r LEFT JOIN admins a ON a.id = r.updated_by ORDER BY r.tag') as $r) {
             $version = $r['release_version'] === 'latest' ? ($latest['version_name'] ?? null) : $r['release_version'];
@@ -202,7 +202,13 @@ final class ReleasesApi
             throw new \RuntimeException("Cannot store the APK in $dir");
         }
         $notes = trim((string) ($_POST['notes'] ?? ''));
-        $id = Db::insert('releases', [
+        $channel = (string) ($_POST['channel'] ?? 'stable');
+        if (!in_array($channel, Releases::CHANNELS, true) || ($channel !== 'stable' && !Releases::hasChannels())) {
+            @unlink("$dir/$fileName");
+            throw HttpError::validation(['channel' => Releases::hasChannels()
+                ? 'Use stable or dev.' : 'Release channels need the latest database update.']);
+        }
+        $id = Db::insert('releases', ($channel !== 'stable' ? ['channel' => $channel] : []) + [
             'version_name' => $versionName,
             'version_code' => $versionCode,
             'sha256' => $sha,
@@ -211,11 +217,11 @@ final class ReleasesApi
             'notes' => $notes === '' ? null : mb_substr($notes, 0, 5000),
             'uploaded_by' => $p->adminId,
         ]);
-        Audit::log($p, 'release.uploaded', 'release', $id, ['version' => $versionName, 'sha256' => $sha]);
+        Audit::log($p, 'release.uploaded', 'release', $id, ['version' => $versionName, 'sha256' => $sha, 'channel' => $channel]);
         return Response::json(Releases::present(Db::one(self::SELECT . ' WHERE r.id = :id', ['id' => $id])), 201);
     }
 
-    /** PATCH /api/v1/admin/releases/{id}  {notes?, active?} — inactive releases are not offered to devices */
+    /** PATCH /api/v1/admin/releases/{id}  {notes?, active?, channel?} — inactive releases are not offered to devices */
     public static function update(Request $req): Response
     {
         $p = AdminAuth::require($req, 'admin');
@@ -231,6 +237,15 @@ final class ReleasesApi
                 throw HttpError::validation(['active' => 'Must be true or false.']);
             }
             $changes['active'] = $b['active'];
+        }
+        if (array_key_exists('channel', $b)) {
+            if (!in_array($b['channel'], Releases::CHANNELS, true)) {
+                throw HttpError::validation(['channel' => 'Use stable or dev.']);
+            }
+            if (!Releases::hasChannels()) {
+                throw HttpError::conflict('Release channels need the latest database update.');
+            }
+            $changes['channel'] = $b['channel'];
         }
         if ($changes !== []) {
             Db::update('releases', $changes, ['id' => $id]);

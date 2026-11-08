@@ -66,6 +66,25 @@ final class Releases
         return $release === 'latest' ? PHP_INT_MAX : ($codes[$release] ?? 0);
     }
 
+    public const CHANNELS = ['stable', 'dev'];
+
+    /** True once the 1.5.0 migration has added releases.channel. */
+    public static function hasChannels(): bool
+    {
+        return Migrator::hasColumn('releases', 'channel');
+    }
+
+    /**
+     * The newest offered release a channel gets: stable sees only stable builds, dev
+     * sees both (so a stable release newer than the last dev build still wins).
+     */
+    public static function latest(string $channel = 'stable'): ?array
+    {
+        $stableOnly = $channel !== 'dev' && self::hasChannels();
+        return Db::one('SELECT * FROM releases WHERE active = 1' . ($stableOnly ? " AND channel = 'stable'" : '')
+            . ' ORDER BY version_code DESC LIMIT 1');
+    }
+
     /** The release a device should be on under its policy, or null. */
     public static function targetFor(array $policy): ?array
     {
@@ -74,8 +93,9 @@ final class Releases
             return null;
         }
         $want = (string) ($updates['release'] ?? 'latest');
+        // "latest" follows the device's channel; a pinned version is used whatever its channel
         $rel = $want === 'latest'
-            ? Db::one('SELECT * FROM releases WHERE active = 1 ORDER BY version_code DESC LIMIT 1')
+            ? self::latest((string) ($updates['channel'] ?? 'stable'))
             : Db::one('SELECT * FROM releases WHERE version_name = :v AND active = 1', ['v' => $want]);
         if ($rel === null) {
             return null;
@@ -86,6 +106,7 @@ final class Releases
             'size' => (int) $rel['size'],
             'sha256' => $rel['sha256'],
             'url' => Util::baseUrl() . '/api/v1/device/releases/' . (int) $rel['id'] . '/download',
+            'channel' => $rel['channel'] ?? 'stable',
         ];
     }
 
@@ -99,6 +120,7 @@ final class Releases
             'size' => (int) $r['size'],
             'notes' => $r['notes'],
             'active' => (bool) $r['active'],
+            'channel' => $r['channel'] ?? 'stable',
             'uploaded_by' => $r['uploaded_by_name'] ?? null,
             'created_at' => Util::iso($r['created_at']),
             'devices_on_version' => isset($r['devices_on_version']) ? (int) $r['devices_on_version'] : null,

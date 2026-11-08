@@ -11,6 +11,7 @@ use Shepherd\Api\Admin\ReleasesApi;
 use Shepherd\Api\Admin\SchedulesApi;
 use Shepherd\Api\Admin\SessionApi;
 use Shepherd\Api\Admin\SsoApi;
+use Shepherd\Api\Admin\SystemApi;
 use Shepherd\Api\Admin\UsersApi;
 use Shepherd\Api\DeviceApi;
 use Shepherd\Http\Response;
@@ -50,6 +51,10 @@ return static function (Router $r): void {
     $r->get("$a/overview", [OverviewApi::class, 'overview']);
     $r->get("$a/audit", [OverviewApi::class, 'audit']);
     $r->post("$a/alerts/test", [OverviewApi::class, 'testAlerts']);
+    $r->get("$a/system/update", [SystemApi::class, 'status']);
+    $r->post("$a/system/update/check", [SystemApi::class, 'check']);
+    $r->post("$a/system/update/install", [SystemApi::class, 'install']);
+    $r->post("$a/system/update/rollback", [SystemApi::class, 'rollback']);
     $r->get("$a/policy/schema", [ProfilesApi::class, 'schema']);
 
     $r->get("$a/devices", [DevicesApi::class, 'list']);

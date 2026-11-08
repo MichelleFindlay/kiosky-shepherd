@@ -339,3 +339,9 @@ button:disabled { opacity: .5; cursor: default; }
 /* Live view */
 .live-frame { display: block; max-width: 100%; max-height: 70vh; margin-top: .75rem; border: 1px solid var(--line); border-radius: 6px; }
 .empty-frame { aspect-ratio: 16 / 10; width: 100%; max-width: 640px; background: var(--surface-2); }
+
+.side-foot .version a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.side-foot .version a:hover { color: var(--accent); }
+
+.release-notes { white-space: pre-wrap; font-family: inherit; background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 7px; padding: .75rem; max-height: 22rem; overflow: auto; margin: 0 0 .75rem; }

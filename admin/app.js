@@ -160,6 +160,7 @@ const NAV = [
   ['#/users', 'Users', 'admin'],
   ['#/tokens', 'API tokens', 'viewer'],
   ['#/audit', 'Audit log', 'admin'],
+  ['#/server', 'Server', 'admin'],
 ];
 
 let mainEl = null;
@@ -180,11 +181,29 @@ function renderShell() {
     nav,
     h('div', { class: 'side-foot' },
       h('div', {}, h('a', { href: '#/account' }, state.me.username), ' · ', state.me.role),
-      state.server ? h('div', { class: 'version' }, `Kiosky Shepherd ${state.server.version}`) : null,
+      h('div', { class: 'version', id: 'version-line' }, versionLine()),
       state.server && state.server.cron ? h('div', { class: 'version', id: 'cron-status' }, cronLine(state.server.cron)) : null,
       h('button', { class: 'small', onclick: logout }, 'Sign out')));
   menuBtn.addEventListener('click', () => setMenu(!side.classList.contains('open')));
   app.append(h('div', { class: 'shell' }, side, mainEl));
+}
+
+const GITHUB_URL = 'https://github.com/MichelleFindlay/kiosky-shepherd';
+
+// "Kiosky Shepherd 1.4.0 · GitHub". The version comes with the session; if it's missing,
+// it's fetched from the public health endpoint so the footer never goes blank.
+function versionLine() {
+  const v = state.server && state.server.version;
+  if (!v) {
+    fetch('/api/v1/health', { credentials: 'same-origin' }).then((r) => r.json()).then((hd) => {
+      if (!hd || !hd.version) return;
+      state.server = Object.assign(state.server || {}, { version: hd.version });
+      const el = document.getElementById('version-line');
+      if (el) clear(el).append(versionLine());
+    }).catch(() => {});
+  }
+  return [`Kiosky Shepherd${v ? ' ' + v : ''}`, ' · ',
+    h('a', { href: GITHUB_URL, target: '_blank', rel: 'noopener noreferrer' }, 'GitHub')];
 }
 
 // "Cron: 4m ago", with a warning when bin/cron.php hasn't run for 30 minutes
@@ -212,11 +231,112 @@ function highlightNav() {
 function page(title, ...headExtras) {
   clear(mainEl);
   const head = h('div', { class: 'page-head' }, h('h1', {}, title), h('div', { class: 'spacer' }), ...headExtras);
-  mainEl.append(migrationBanner(), head);
+  mainEl.append(migrationBanner(), updateBanner(), head);
   return mainEl;
 }
 
 // After an upgrade, admins can apply new database migrations here instead of over SSH
+// Admins hear about a new Kiosky Shepherd release on every page (from cron's last check)
+function updateBanner() {
+  const u = state.server && state.server.update;
+  if (!u || !u.available || !can('admin') || location.hash === '#/server') return null;
+  return h('div', { class: 'card banner' },
+    h('div', {}, h('strong', {}, `Kiosky Shepherd ${u.latest} is available. `), `You have ${state.server.version}.`),
+    h('a', { class: 'btn small primary', href: '#/server' }, 'Review and install'));
+}
+
+async function viewServer() {
+  page('Server');
+  const box = h('div', { class: 'stack' });
+  mainEl.append(box);
+  const render = (st) => {
+    clear(box);
+    const c = st.check;
+    const card = h('div', { class: 'card' }, h('h2', {}, 'Kiosky Shepherd updates'));
+    card.append(h('dl', { class: 'kv' },
+      h('dt', {}, 'Installed'), h('dd', {}, st.current),
+      h('dt', {}, 'Newest release'), h('dd', {}, c && c.latest ? [c.latest, c.prerelease ? ' (pre-release)' : '',
+        c.url ? [' · ', h('a', { href: c.url, target: '_blank', rel: 'noopener noreferrer' }, 'on GitHub')] : null] : 'not checked yet'),
+      h('dt', {}, 'Last checked'), h('dd', {}, c && c.checked_at ? when(c.checked_at) : 'never',
+        c && c.error ? h('div', { class: 'error-text' }, c.error) : null),
+      h('dt', {}, 'Source'), h('dd', {}, h('code', {}, st.repo)),
+      h('dt', {}, 'Automatic install'), h('dd', {}, st.auto ? 'On: cron installs new stable releases' : 'Off (self_update.auto)')));
+
+    const checkBtn = h('button', { class: 'small' }, 'Check now');
+    checkBtn.addEventListener('click', async () => {
+      checkBtn.disabled = true;
+      try { const r = await api.post('/admin/system/update/check'); syncBanner(r); render(r); } catch (ex) { fail(ex); checkBtn.disabled = false; }
+    });
+    const actions = h('div', { class: 'actions' }, checkBtn);
+    card.append(actions);
+
+    if (c && c.available) {
+      if (c.notes) card.append(h('h3', {}, `What's new in ${c.latest}`), h('pre', { class: 'release-notes' }, c.notes));
+      if (st.problems.length) {
+        card.append(h('h3', {}, 'Can\'t install from here'), h('ul', {}, st.problems.map((p) => h('li', { class: 'error-text' }, p))),
+          h('p', { class: 'sub' }, 'You can still update by uploading the release\'s files over the old ones (keep config/config.php and storage/).'));
+      } else {
+        const install = h('button', { class: 'primary' }, `Install ${c.latest}`);
+        install.addEventListener('click', async () => {
+          if (!window.confirm(`Install Kiosky Shepherd ${c.latest}? The current files are backed up first, and the console reloads when it's done.`)) return;
+          install.disabled = true;
+          install.textContent = 'Installing… (this can take a minute)';
+          checkBtn.disabled = true;
+          try {
+            const r = await api.post('/admin/system/update/install', { version: c.latest });
+            toast(`Installed ${r.to}. Reloading…`);
+            setTimeout(() => location.reload(), 1500);
+          } catch (ex) {
+            fail(ex);
+            install.disabled = false;
+            install.textContent = `Install ${c.latest}`;
+            checkBtn.disabled = false;
+          }
+        });
+        actions.prepend(install);
+        card.append(h('p', { class: 'sub' }, 'The current files are zipped into storage/backups first. config/config.php and storage/ are never changed. '
+          + 'Database updates in the new version apply on the next page load.'));
+      }
+    } else if (c && c.latest) {
+      card.append(h('p', {}, h('span', { class: 'chip ok' }, 'Up to date')));
+    }
+    box.append(card);
+
+    if (st.last) {
+      box.append(h('div', { class: 'card' }, h('h2', {}, 'Last change'),
+        h('p', {}, st.last.action === 'installed' ? `Updated from ${st.last.from} to ${st.last.to}` : `Rolled back from ${st.last.from} to ${st.last.to}`,
+          ` by ${st.last.by}, `, when(st.last.at), '.')));
+    }
+
+    const backups = h('div', { class: 'card' }, h('h2', {}, 'Backups'),
+      h('p', { class: 'sub' }, 'Made before each update (the last five are kept). Rolling back restores the files only: '
+        + 'database changes stay, and older versions ignore what they don\'t know.'));
+    if (!st.backups.length) backups.append(h('div', { class: 'empty' }, 'No backups yet.'));
+    else {
+      backups.append(h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Version'), h('th', {}, 'Made'), h('th', { class: 'hide-sm' }, 'Size'), h('th', {}))),
+        h('tbody', {}, st.backups.map((b) => h('tr', {},
+          h('td', {}, b.version), h('td', {}, when(b.created_at)), h('td', { class: 'hide-sm' }, bytes(b.size)),
+          h('td', {}, h('button', {
+            class: 'small danger',
+            onclick: async () => {
+              if (!window.confirm(`Put back the Kiosky Shepherd ${b.version} files? The current files are backed up first.`)) return;
+              try {
+                const r = await api.post('/admin/system/update/rollback', { backup: b.name });
+                toast(`Rolled back to ${r.to}. Reloading…`);
+                setTimeout(() => location.reload(), 1500);
+              } catch (ex) { fail(ex); }
+            },
+          }, `Roll back to ${b.version}`))))))));
+    }
+    box.append(backups);
+  };
+  const syncBanner = (st) => {
+    if (state.server && st.check) state.server.update = { latest: st.check.latest, available: st.check.available };
+  };
+  render(await api.get('/admin/system/update'));
+}
+
 function migrationBanner() {
   const pending = state.server && state.server.pending_migrations;
   if (!pending || !pending.length) return null;
@@ -388,6 +508,7 @@ const ROUTES = [
   [/^#\/tokens$/, viewTokens],
   [/^#\/audit$/, viewAudit],
   [/^#\/account$/, viewAccount],
+  [/^#\/server$/, viewServer],
 ];
 
 async function route() {
@@ -1455,17 +1576,21 @@ async function viewSchedules() {
 async function viewReleases() {
   const releases = await api.get('/admin/releases');
   page('Releases');
-  mainEl.append(h('p', { class: 'sub' }, 'APKs uploaded here are offered to devices whose update source is "server". Profiles choose "latest" or pin a version. Each APK must be signed with the same key as the installed Kiosky, or Android refuses it.'));
+  mainEl.append(h('p', { class: 'sub' }, 'APKs uploaded here are offered to devices whose update source is "server". Profiles choose "latest" or pin a version. '
+    + 'Each release is stable or dev: "latest" means the newest stable release, except on devices whose Release channel setting is dev, which get dev builds too. '
+    + 'Each APK must be signed with the same key as the installed Kiosky, or Android refuses it.'));
 
   const list = h('div', { class: 'card' });
   if (!releases.length) list.append(h('div', { class: 'empty' }, 'No releases uploaded. Devices on the "server" source won\'t update until you add one.'));
   else {
     list.append(h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, h('th', {}, 'Version'), h('th', { class: 'num hide-sm' }, 'Code'), h('th', { class: 'hide-sm' }, 'Size'), h('th', { class: 'hide-sm' }, 'SHA-256'),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Version'), h('th', {}, 'Channel'), h('th', { class: 'num hide-sm' }, 'Code'), h('th', { class: 'hide-sm' }, 'Size'), h('th', { class: 'hide-sm' }, 'SHA-256'),
         h('th', { class: 'num hide-sm' }, 'Devices on it'), h('th', { class: 'num hide-sm', title: 'Devices whose profile, ring or override points at this release' }, 'Targeted'),
         h('th', { class: 'hide-sm' }, 'Uploaded'), h('th', {}, 'Offered'), h('th', {}))),
       h('tbody', {}, releases.map((r) => h('tr', {},
         h('td', {}, h('strong', {}, r.version_name), r.notes ? h('div', { class: 'sub' }, r.notes) : null),
+        h('td', {}, r.channel === 'dev' ? h('span', { class: 'chip warn', title: 'Only devices on the dev channel get this as "latest"' }, 'Dev')
+          : h('span', { class: 'chip ok' }, 'Stable')),
         h('td', { class: 'num hide-sm' }, r.version_code),
         h('td', { class: 'hide-sm' }, bytes(r.size)),
         h('td', { class: 'hide-sm' }, h('code', { title: r.sha256 }, r.sha256.slice(0, 12) + '…')),
@@ -1479,6 +1604,17 @@ async function viewReleases() {
             onclick: async () => { try { await api.patch(`/admin/releases/${r.id}`, { active: !r.active }); route(); } catch (ex) { fail(ex); } },
           }, r.active ? 'Withdraw' : 'Offer'),
           h('button', {
+            class: 'small',
+            title: r.channel === 'dev' ? 'Offer it to every device on "latest"' : 'Offer it only to devices on the dev channel',
+            onclick: async () => {
+              try {
+                await api.patch(`/admin/releases/${r.id}`, { channel: r.channel === 'dev' ? 'stable' : 'dev' });
+                toast(r.channel === 'dev' ? `${r.version_name} is now stable.` : `${r.version_name} is now a dev build.`);
+                route();
+              } catch (ex) { fail(ex); }
+            },
+          }, r.channel === 'dev' ? 'Promote to stable' : 'Move to dev'),
+          h('button', {
             class: 'small danger',
             onclick: async () => {
               if (!window.confirm(`Delete release ${r.version_name}?`)) return;
@@ -1491,6 +1627,8 @@ async function viewReleases() {
   if (can('admin')) {
     const file = h('input', { type: 'file', accept: '.apk,application/vnd.android.package-archive', required: true });
     const notes = h('input', { type: 'text' });
+    const channel = h('select', {}, h('option', { value: 'stable' }, 'Stable: every device on "latest"'),
+      h('option', { value: 'dev' }, 'Dev: only devices on the dev channel'));
     const vName = h('input', { type: 'text', placeholder: 'read from APK' });
     const vCode = h('input', { type: 'number', placeholder: 'read from APK' });
     const button = h('button', { class: 'primary', type: 'submit' }, 'Upload');
@@ -1503,6 +1641,7 @@ async function viewReleases() {
           const fd = new FormData();
           fd.append('apk', file.files[0]);
           fd.append('notes', notes.value);
+          fd.append('channel', channel.value);
           if (vName.value) fd.append('version_name', vName.value);
           if (vCode.value) fd.append('version_code', vCode.value);
           button.disabled = true;
@@ -1512,7 +1651,9 @@ async function viewReleases() {
             button.textContent = 'Upload';
           }
         },
-      }, field('APK file', file), field('Release notes', notes), advanced, button)));
+      }, field('APK file', file), field('Release notes', notes),
+      field('Channel', channel, 'Upload test builds as dev, try them on a few tablets (set their Release channel to dev, or use a ring), then promote to stable.'),
+      advanced, button)));
   }
 }
 

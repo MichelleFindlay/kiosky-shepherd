@@ -42,6 +42,26 @@ DirectoryIndex index.php index.html
         Header set Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         Header set Cache-Control "no-cache"
     </FilesMatch>
+    # The console's code: browsers re-check it on every load (a cheap 304 when
+    # unchanged), so an upload shows up straight away instead of days later
+    <FilesMatch "\.(js|css)$">
+        Header set Cache-Control "no-cache"
+    </FilesMatch>
+    # Logos and icons rarely change
+    <FilesMatch "\.(png|ico|svg)$">
+        Header set Cache-Control "public, max-age=604800"
+    </FilesMatch>
+</IfModule>
+
+# Fallback for hosts without mod_headers: max-age=0 also makes browsers re-check
+<IfModule !mod_headers.c>
+    <IfModule mod_expires.c>
+        ExpiresActive On
+        ExpiresByType text/html "access plus 0 seconds"
+        ExpiresByType text/css "access plus 0 seconds"
+        ExpiresByType application/javascript "access plus 0 seconds"
+        ExpiresByType text/javascript "access plus 0 seconds"
+    </IfModule>
 </IfModule>
 
 # Uploading APKs through the console. Some hosts ignore these here; if uploads

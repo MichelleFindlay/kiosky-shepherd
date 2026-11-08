@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 define('SHEPHERD_ROOT', dirname(__DIR__));
-define('SHEPHERD_VERSION', '1.4.0');
+define('SHEPHERD_VERSION', '1.5.0');
 
 if (PHP_VERSION_ID < 80100) {
     http_response_code(500);

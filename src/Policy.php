@@ -111,6 +111,11 @@ final class Policy
             'label' => 'Update source',
             'help' => 'server: install the release chosen below from this server. github: Kiosky\'s own GitHub release check. off: never update.',
         ],
+        'updates.channel' => [
+            'type' => 'enum', 'values' => ['stable', 'dev'], 'default' => 'stable', 'group' => 'Updates',
+            'label' => 'Release channel',
+            'help' => 'stable: "latest" means the newest release marked stable. dev: the newest release of any kind, so these devices get development builds first. With the github source, dev also takes GitHub pre-releases (needs Kiosky support).',
+        ],
         'updates.release' => [
             'type' => 'release', 'default' => 'latest', 'group' => 'Updates', 'label' => 'Release',
             'help' => '"latest" or a version uploaded under Releases, e.g. 1.2.0. Devices only ever move up; Android refuses downgrades.',
