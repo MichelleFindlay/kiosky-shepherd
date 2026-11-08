@@ -123,10 +123,29 @@ return [
     // PHP needs write access to the project files, plus the curl and zip extensions.
     'self_update' => [
         'enabled' => true,       // false: only report new versions, never install from the console
-        'auto' => false,         // true: bin/cron.php installs new stable releases by itself
-        'prereleases' => false,  // also offer pre-release versions such as 1.6.0-beta.1
+        'channel' => 'stable',   // 'stable' follows the main branch, 'dev' the dev branch
+        'auto' => false,         // true: bin/cron.php installs the newest build on that branch by itself
+        // 'branches' => ['stable' => 'main', 'dev' => 'dev'],
         // 'repo' => 'MichelleFindlay/kiosky-shepherd',
         // 'github_token' => '', // only if GitHub rate-limits your server's IP address
+    ],
+
+    // ---- Outgoing email ------------------------------------------------------
+    // Alert emails go through PHP mail() unless you set an SMTP server here. Server
+    // → Email in the console sends a test. Ports: 587 with 'starttls', 465 with 'tls'.
+    // These can only be set here (not in the console): whoever controls the SMTP
+    // host would receive the password.
+    'mail' => [
+        'transport' => 'mail',            // 'mail' (PHP mail()) or 'smtp'
+        // 'host' => 'smtp.example.com',
+        // 'port' => 587,
+        // 'encryption' => 'starttls',    // 'starttls', 'tls' (implicit, port 465) or 'none'
+        // 'username' => 'kiosks@example.com',
+        // 'password' => '',
+        // 'from' => 'kiosks@example.com', // must usually be an address the SMTP account may send as
+        // 'from_name' => 'Kiosky Shepherd',
+        // 'timeout' => 15,
+        // 'verify_peer' => true,         // false only for a server with a self-signed certificate
     ],
 
     // ---- Offline alerts (optional) -------------------------------------------
@@ -136,7 +155,7 @@ return [
     'alerts' => [
         'offline_minutes' => 15,          // how long without a check-in counts as offline
         'ignore_tags' => ['no-alerts'],
-        // 'email' => ['it@example.com'], // sent with PHP mail()
+        // 'email' => ['it@example.com'], // sent by SMTP (see 'mail' above) or PHP mail()
         // 'email_from' => 'kiosks@example.com',
         'webhooks' => [
             // ['type' => 'slack',   'url' => 'https://hooks.slack.com/services/…'], // also Mattermost, Rocket.Chat

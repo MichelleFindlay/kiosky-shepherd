@@ -11,8 +11,12 @@ use Shepherd\Http\HttpError;
  * Updates Kiosky Shepherd itself from its GitHub repository, from the console (or by
  * cron when 'self_update' => ['auto' => true]).
  *
- * Install: download the release archive from GitHub over HTTPS, check every path in
- * it and that it really is the version it claims, zip the current files into
+ * Channels follow branches: stable = the newest commit on main, dev = the newest
+ * commit on dev (configurable). The exact commit installed is recorded in storage,
+ * so dev builds that keep the same version number are still noticed.
+ *
+ * Install: download that commit's archive from GitHub over HTTPS, check every path in
+ * it and that it is the version it claimed, zip the current files into
  * storage/backups, then write the new files one by one (each to a temporary file,
  * then renamed into place). config/config.php, storage/ and .user.ini are never
  * touched. If writing fails part-way, the backup is restored. Database updates in
@@ -20,8 +24,11 @@ use Shepherd\Http\HttpError;
  */
 final class SelfUpdate
 {
+    public const CHANNELS = ['stable', 'dev'];
+
     private const CACHE = 'cache/self-update.json';
     private const LAST = 'self-update-last.json';
+    private const INSTALLED = 'self-update-installed.json';
     private const CHECK_EVERY = 6 * 3600;
     private const MAX_ARCHIVE = 40 * 1024 * 1024;
     private const KEEP_BACKUPS = 5;
@@ -32,7 +39,7 @@ final class SelfUpdate
     /** Paths an update never writes into. */
     private const SKIP_PREFIXES = ['storage/', '.git/', '.github/'];
     private const SKIP_FILES = ['.gitignore'];
-    /** Present in every real release; checked before anything is written. */
+    /** Present in every real build; checked before anything is written. */
     private const REQUIRED = ['index.php', 'src/bootstrap.php', 'src/Migrator.php', 'admin/app.js', 'admin/index.html'];
 
     // ---- Settings ---------------------------------------------------------------
@@ -53,9 +60,17 @@ final class SelfUpdate
         return (bool) Config::get('self_update.auto', false);
     }
 
-    private static function prereleases(): bool
+    public static function channel(): string
     {
-        return (bool) Config::get('self_update.prereleases', false);
+        return Config::get('self_update.channel', 'stable') === 'dev' ? 'dev' : 'stable';
+    }
+
+    /** The branch a channel follows: main and dev unless config.php says otherwise. */
+    public static function branch(?string $channel = null): string
+    {
+        $channel ??= self::channel();
+        $b = (string) Config::get("self_update.branches.$channel", $channel === 'dev' ? 'dev' : 'main');
+        return preg_match('#^[A-Za-z0-9._/\-]{1,100}$#', $b) && !str_contains($b, '..') ? $b : ($channel === 'dev' ? 'dev' : 'main');
     }
 
     /** @return array<string, string> */
@@ -69,9 +84,37 @@ final class SelfUpdate
         return $h;
     }
 
-    public static function normalise(string $tag): string
+    private static function api(string $path): array
     {
-        return ltrim(trim($tag), 'vV');
+        $r = HttpClient::request('GET', 'https://api.github.com/repos/' . self::repo() . $path, self::githubHeaders());
+        if ($r['status'] === 403 || $r['status'] === 429) {
+            throw new \RuntimeException('GitHub rate-limited this server. Try again later, or set self_update.github_token.');
+        }
+        $data = json_decode($r['body'], true);
+        if ($r['status'] !== 200 || !is_array($data)) {
+            throw new \RuntimeException("GitHub answered HTTP {$r['status']} for $path.", $r['status']);
+        }
+        return $data;
+    }
+
+    // ---- What's installed --------------------------------------------------------
+
+    /** @return array{sha: ?string, branch: ?string, version: string} the build on this server */
+    public static function installed(): array
+    {
+        $data = json_decode((string) @file_get_contents(Config::storage(self::INSTALLED)), true);
+        // Only trust the recorded commit if the files still say the version recorded with it
+        if (is_array($data) && ($data['version'] ?? null) === SHEPHERD_VERSION && is_string($data['sha'] ?? null)) {
+            return ['sha' => $data['sha'], 'branch' => is_string($data['branch'] ?? null) ? $data['branch'] : null, 'version' => SHEPHERD_VERSION];
+        }
+        return ['sha' => null, 'branch' => null, 'version' => SHEPHERD_VERSION];
+    }
+
+    private static function recordInstalled(?string $sha, ?string $branch, string $version): void
+    {
+        @file_put_contents(Config::storage(self::INSTALLED), json_encode([
+            'sha' => $sha, 'branch' => $branch, 'version' => $version, 'installed_at' => gmdate('c'),
+        ], JSON_UNESCAPED_SLASHES), LOCK_EX);
     }
 
     // ---- Checking ---------------------------------------------------------------
@@ -80,34 +123,57 @@ final class SelfUpdate
     public static function cached(): ?array
     {
         $data = json_decode((string) @file_get_contents(Config::storage(self::CACHE)), true);
-        if (!is_array($data)) {
-            return null;
+        if (!is_array($data) || !is_string($data['sha'] ?? null)) {
+            return is_array($data) ? $data + ['available' => false, 'current' => SHEPHERD_VERSION] : null;
         }
+        $installed = self::installed();
+        $latest = (string) ($data['latest'] ?? '');
         $data['current'] = SHEPHERD_VERSION;
-        $data['available'] = is_string($data['latest'] ?? null) && version_compare($data['latest'], SHEPHERD_VERSION, '>');
+        $data['installed_sha'] = $installed['sha'];
+        $data['downgrade'] = $latest !== '' && version_compare($latest, SHEPHERD_VERSION, '<');
+        if ($installed['sha'] !== null) {
+            $data['available'] = !str_starts_with($data['sha'], $installed['sha']) && !str_starts_with($installed['sha'], $data['sha']);
+            $data['unknown_build'] = false;
+        } else {
+            // A copy uploaded by hand: we don't know its commit. On stable, offer only a
+            // newer version; on dev, offer to sync with the branch.
+            $data['unknown_build'] = true;
+            $data['available'] = ($data['channel'] ?? 'stable') === 'dev'
+                ? !$data['downgrade']
+                : $latest !== '' && version_compare($latest, SHEPHERD_VERSION, '>');
+        }
+        // A check made for another channel (the setting changed since) doesn't count
+        if (($data['channel'] ?? null) !== self::channel()) {
+            $data['available'] = false;
+            $data['stale_channel'] = true;
+        }
         return $data;
     }
 
     /**
-     * Asks GitHub for the newest release (or, when the repository has no releases, the
-     * newest version tag). Cached for 6 hours unless $force.
+     * Asks GitHub for the newest commit on the channel's branch, its version and what
+     * changed since the installed build. Cached for 6 hours unless $force.
      */
     public static function check(bool $force = false): array
     {
         $cached = self::cached();
-        if (!$force && $cached !== null && strtotime((string) ($cached['checked_at'] ?? '')) > time() - self::CHECK_EVERY) {
+        if (!$force && $cached !== null && empty($cached['stale_channel'])
+            && strtotime((string) ($cached['checked_at'] ?? '')) > time() - self::CHECK_EVERY) {
             return $cached;
         }
-        $result = ['checked_at' => gmdate('c'), 'repo' => self::repo(), 'error' => null];
+        $channel = self::channel();
+        $branch = self::branch($channel);
+        $result = ['checked_at' => gmdate('c'), 'repo' => self::repo(), 'channel' => $channel, 'branch' => $branch, 'error' => null];
         try {
-            $result += self::newestRelease() ?? self::newestTag()
-                ?? throw new \RuntimeException('The repository has no releases or version tags yet.');
+            $result += self::branchHead($branch);
         } catch (\Throwable $e) {
-            // Keep what we knew, so a GitHub hiccup doesn't hide an available update
+            // Keep what we knew for this channel, so a GitHub hiccup doesn't hide an update
             $result['error'] = $e->getMessage();
-            foreach (['latest', 'tag', 'name', 'notes', 'url', 'published_at', 'zip', 'prerelease'] as $k) {
-                if (isset($cached[$k])) {
-                    $result[$k] = $cached[$k];
+            if (($cached['channel'] ?? null) === $channel) {
+                foreach (['sha', 'latest', 'message', 'committed_at', 'url', 'zip', 'commits', 'notes', 'release_url'] as $k) {
+                    if (isset($cached[$k])) {
+                        $result[$k] = $cached[$k];
+                    }
                 }
             }
         }
@@ -119,67 +185,63 @@ final class SelfUpdate
         return self::cached() ?? $result;
     }
 
-    private static function newestRelease(): ?array
+    private static function branchHead(string $branch): array
     {
-        $r = HttpClient::request('GET', 'https://api.github.com/repos/' . self::repo() . '/releases?per_page=15', self::githubHeaders());
-        if ($r['status'] === 404) {
-            throw new \RuntimeException('GitHub doesn\'t know the repository ' . self::repo() . ' (or it is private).');
-        }
-        if ($r['status'] === 403 || $r['status'] === 429) {
-            throw new \RuntimeException('GitHub rate-limited this server. Try again later, or set self_update.github_token.');
-        }
-        $list = json_decode($r['body'], true);
-        if ($r['status'] !== 200 || !is_array($list)) {
-            throw new \RuntimeException("GitHub answered HTTP {$r['status']}.");
-        }
-        $best = null;
-        foreach ($list as $rel) {
-            if (!is_array($rel) || !empty($rel['draft']) || !is_string($rel['tag_name'] ?? null)) {
-                continue;
+        try {
+            $b = self::api('/branches/' . rawurlencode($branch));
+        } catch (\RuntimeException $e) {
+            if ($e->getCode() === 404) {
+                throw new \RuntimeException('GitHub has no branch ' . $branch . ' in ' . self::repo() . ' (or the repository is private).');
             }
-            $v = self::normalise($rel['tag_name']);
-            if (!self::isVersion($v) || (!empty($rel['prerelease']) && !self::prereleases())) {
-                continue;
-            }
-            if ($best === null || version_compare($v, $best['latest'], '>')) {
-                $best = [
-                    'latest' => $v,
-                    'tag' => $rel['tag_name'],
-                    'name' => is_string($rel['name'] ?? null) && $rel['name'] !== '' ? $rel['name'] : $rel['tag_name'],
-                    'notes' => mb_substr((string) ($rel['body'] ?? ''), 0, 20000),
-                    'url' => (string) ($rel['html_url'] ?? ''),
-                    'published_at' => $rel['published_at'] ?? null,
-                    'zip' => (string) ($rel['zipball_url'] ?? ''),
-                    'prerelease' => !empty($rel['prerelease']),
-                ];
-            }
+            throw $e;
         }
-        return $best;
-    }
-
-    private static function newestTag(): ?array
-    {
-        $tags = HttpClient::json('GET', 'https://api.github.com/repos/' . self::repo() . '/tags?per_page=50', self::githubHeaders());
-        $best = null;
-        foreach ($tags as $t) {
-            $v = is_array($t) && is_string($t['name'] ?? null) ? self::normalise($t['name']) : '';
-            if (!self::isVersion($v) || (str_contains($v, '-') && !self::prereleases())) {
-                continue;
-            }
-            if ($best === null || version_compare($v, $best['latest'], '>')) {
-                $best = [
-                    'latest' => $v, 'tag' => $t['name'], 'name' => $t['name'], 'notes' => '',
-                    'url' => 'https://github.com/' . self::repo() . '/releases/tag/' . rawurlencode($t['name']),
-                    'published_at' => null, 'zip' => (string) ($t['zipball_url'] ?? ''), 'prerelease' => str_contains($v, '-'),
-                ];
+        $sha = (string) ($b['commit']['sha'] ?? '');
+        if (!preg_match('/^[0-9a-f]{40}$/', $sha)) {
+            throw new \RuntimeException("GitHub returned no commit for $branch.");
+        }
+        // The version that commit declares
+        $file = self::api('/contents/src/bootstrap.php?ref=' . $sha);
+        $boot = base64_decode((string) ($file['content'] ?? ''), false) ?: '';
+        if (!preg_match("/define\\('SHEPHERD_VERSION', '([^']+)'\\)/", $boot, $m)) {
+            throw new \RuntimeException("The $branch branch doesn't look like Kiosky Shepherd (no version in src/bootstrap.php).");
+        }
+        $out = [
+            'sha' => $sha,
+            'latest' => $m[1],
+            'message' => mb_substr((string) ($b['commit']['commit']['message'] ?? ''), 0, 2000),
+            'committed_at' => $b['commit']['commit']['committer']['date'] ?? null,
+            'url' => 'https://github.com/' . self::repo() . '/commit/' . $sha,
+            'zip' => 'https://api.github.com/repos/' . self::repo() . '/zipball/' . $sha,
+            'commits' => [],
+            'notes' => '',
+            'release_url' => null,
+        ];
+        // What changed since the installed build, when we know which commit that is
+        $installed = self::installed()['sha'];
+        if ($installed !== null && $installed !== $sha) {
+            try {
+                $cmp = self::api('/compare/' . $installed . '...' . $sha);
+                foreach (array_slice(array_reverse((array) ($cmp['commits'] ?? [])), 0, 30) as $c) {
+                    $out['commits'][] = [
+                        'sha' => substr((string) ($c['sha'] ?? ''), 0, 7),
+                        'message' => mb_substr(strtok((string) ($c['commit']['message'] ?? ''), "\n") ?: '', 0, 200),
+                        'date' => $c['commit']['committer']['date'] ?? null,
+                    ];
+                }
+                $out['behind'] = (int) ($cmp['ahead_by'] ?? count($out['commits']));
+            } catch (\Throwable) {
+                // e.g. a branch that was force-pushed: the list is only a nicety
             }
         }
-        return $best;
-    }
-
-    private static function isVersion(string $v): bool
-    {
-        return preg_match('/^\d+\.\d+\.\d+([\-+][0-9A-Za-z.\-]+)?$/', $v) === 1;
+        // Release notes when that version has a GitHub release
+        try {
+            $rel = self::api('/releases/tags/' . rawurlencode('v' . $m[1]));
+            $out['notes'] = mb_substr((string) ($rel['body'] ?? ''), 0, 20000);
+            $out['release_url'] = $rel['html_url'] ?? null;
+        } catch (\Throwable) {
+            // no release for this version (normal on dev)
+        }
+        return $out;
     }
 
     // ---- Preflight --------------------------------------------------------------
@@ -245,7 +307,7 @@ final class SelfUpdate
         foreach ($it as $f) {
             /** @var \SplFileInfo $f */
             $path = $f->getPathname();
-            if (str_starts_with($path, $storage)) {
+            if (str_starts_with($path, $storage) || str_starts_with($path, Config::storage())) {
                 continue;
             }
             $rel = substr($path, strlen(SHEPHERD_ROOT) + 1);
@@ -278,60 +340,75 @@ final class SelfUpdate
         $last = json_decode((string) @file_get_contents(Config::storage(self::LAST)), true);
         return [
             'current' => SHEPHERD_VERSION,
+            'installed' => self::installed(),
             'repo' => self::repo(),
+            'channel' => self::channel(),
+            'branches' => ['stable' => self::branch('stable'), 'dev' => self::branch('dev')],
             'check' => self::cached(),
             'problems' => self::problems(),
             'auto' => self::auto(),
-            'prereleases' => self::prereleases(),
             'last' => is_array($last) ? $last : null,
             'backups' => self::backups(),
         ];
     }
 
-    /** @return list<array{name: string, version: string, size: int, created_at: string}> newest first */
+    /** @return list<array{name: string, version: string, sha: ?string, size: int, created_at: string}> newest first */
     public static function backups(): array
     {
         $out = [];
         foreach (glob(Config::storage('backups') . '/shepherd-*.zip') ?: [] as $f) {
             if (preg_match('/^shepherd-(.+)-(\d{8}-\d{6})\.zip$/', basename($f), $m)) {
-                $out[] = ['name' => basename($f), 'version' => $m[1], 'size' => (int) filesize($f),
-                    'created_at' => gmdate('c', (int) filemtime($f))];
+                $out[] = ['name' => basename($f), 'version' => $m[1], 'sha' => self::backupMeta($f)['sha'] ?? null,
+                    'size' => (int) filesize($f), 'created_at' => gmdate('c', (int) filemtime($f))];
             }
         }
         usort($out, static fn ($a, $b) => strcmp($b['created_at'], $a['created_at']));
         return $out;
     }
 
+    /** The installed-build record stored in a backup's zip comment. */
+    private static function backupMeta(string $path): array
+    {
+        $zip = new \ZipArchive();
+        if (!class_exists(\ZipArchive::class) || $zip->open($path) !== true) {
+            return [];
+        }
+        $meta = json_decode((string) $zip->getArchiveComment(), true);
+        $zip->close();
+        return is_array($meta) ? $meta : [];
+    }
+
     // ---- Install and roll back ---------------------------------------------------
 
     /**
-     * Installs the newest release found by the last check. $version must match it,
-     * so a click on a stale page can't install something unexpected.
+     * Installs the newest commit on the channel's branch. $sha must match it (as found
+     * by a fresh check), so a click on a stale page can't install something unexpected.
      */
-    public static function install(string $version, ?Principal $by): array
+    public static function install(string $sha, ?Principal $by): array
     {
         $problems = self::problems();
         if ($problems !== []) {
             throw HttpError::conflict(implode(' ', $problems));
         }
         $info = self::check(true);
-        if (!is_string($info['latest'] ?? null) || $info['latest'] !== $version) {
-            throw HttpError::conflict('The newest release is ' . ($info['latest'] ?? 'unknown') . ", not $version. Reload the page.");
+        if (!empty($info['error'])) {
+            throw HttpError::conflict('Couldn\'t check GitHub: ' . $info['error']);
         }
-        if (!version_compare($version, SHEPHERD_VERSION, '>')) {
-            throw HttpError::conflict("Kiosky Shepherd $version is not newer than the installed " . SHEPHERD_VERSION . '.');
+        if (!is_string($info['sha'] ?? null) || $info['sha'] !== $sha) {
+            throw HttpError::conflict('The ' . ($info['branch'] ?? 'branch') . ' branch has moved on since this page loaded. Reload it.');
         }
-        $zipUrl = (string) ($info['zip'] ?? '');
-        if (!str_starts_with($zipUrl, 'https://api.github.com/repos/' . self::repo() . '/')
-            && !str_starts_with($zipUrl, 'https://github.com/' . self::repo() . '/')) {
-            throw HttpError::conflict('The release has no download from ' . self::repo() . '.');
+        $version = (string) $info['latest'];
+        $zipUrl = (string) $info['zip'];
+        if (!str_starts_with($zipUrl, 'https://api.github.com/repos/' . self::repo() . '/zipball/')) {
+            throw HttpError::conflict('Unexpected download address.');
         }
 
         @set_time_limit(600);
         ignore_user_abort(true);
         $lock = self::lock();
-        $work = Config::storage('updates/' . preg_replace('/[^0-9A-Za-z.\-]/', '', $version) . '-' . bin2hex(random_bytes(4)));
+        $work = Config::storage('updates/' . substr($sha, 0, 12) . '-' . bin2hex(random_bytes(4)));
         $from = SHEPHERD_VERSION;
+        $fromSha = self::installed()['sha'];
         $backup = '';
         try {
             if (!mkdir($work, 0750, true) && !is_dir($work)) {
@@ -354,9 +431,11 @@ final class SelfUpdate
             flock($lock, LOCK_UN);
             fclose($lock);
         }
+        self::recordInstalled($sha, (string) $info['branch'], $version);
         self::resetOpcache();
         self::pruneBackups();
-        $result = ['action' => 'installed', 'from' => $from, 'to' => $version, 'backup' => basename($backup),
+        $result = ['action' => 'installed', 'from' => $from, 'from_sha' => $fromSha, 'to' => $version, 'sha' => $sha,
+            'channel' => $info['channel'], 'branch' => $info['branch'], 'backup' => basename($backup),
             'at' => gmdate('c'), 'by' => $by?->name ?? 'cron'];
         @file_put_contents(Config::storage(self::LAST), json_encode($result, JSON_UNESCAPED_SLASHES), LOCK_EX);
         Audit::log($by, 'server.updated', null, null, $result);
@@ -376,6 +455,7 @@ final class SelfUpdate
         @set_time_limit(300);
         ignore_user_abort(true);
         $lock = self::lock();
+        $meta = self::backupMeta(Config::storage("backups/$name"));
         try {
             $safety = self::backup(); // so the rollback can itself be undone
             self::restore(Config::storage("backups/$name"));
@@ -383,9 +463,12 @@ final class SelfUpdate
             flock($lock, LOCK_UN);
             fclose($lock);
         }
-        self::resetOpcache();
         preg_match('/^shepherd-(.+)-\d{8}-\d{6}\.zip$/', $name, $m);
-        $result = ['action' => 'rolled_back', 'from' => SHEPHERD_VERSION, 'to' => $m[1] ?? '?', 'backup' => basename($safety),
+        $to = $m[1] ?? '?';
+        self::recordInstalled(is_string($meta['sha'] ?? null) ? $meta['sha'] : null,
+            is_string($meta['branch'] ?? null) ? $meta['branch'] : null, $to);
+        self::resetOpcache();
+        $result = ['action' => 'rolled_back', 'from' => SHEPHERD_VERSION, 'to' => $to, 'backup' => basename($safety),
             'at' => gmdate('c'), 'by' => $by?->name ?? 'system'];
         @file_put_contents(Config::storage(self::LAST), json_encode($result, JSON_UNESCAPED_SLASHES), LOCK_EX);
         Audit::log($by, 'server.rolled_back', null, null, $result + ['restored' => $name]);
@@ -400,16 +483,20 @@ final class SelfUpdate
             return 'update check failed: ' . $info['error'];
         }
         if (empty($info['available'])) {
-            return 'up to date';
+            return 'up to date with ' . ($info['branch'] ?? self::branch());
         }
-        if (!self::auto() || !empty($info['prerelease'])) {
-            return "update {$info['latest']} available";
+        $what = ($info['latest'] ?? '?') . ' (' . substr((string) ($info['sha'] ?? ''), 0, 7) . ' on ' . ($info['branch'] ?? '?') . ')';
+        if (!self::auto()) {
+            return "update $what available";
+        }
+        if (!empty($info['downgrade'])) {
+            return "$what is older than the installed " . SHEPHERD_VERSION . '; not installed automatically';
         }
         if (self::problems() !== []) {
-            return "update {$info['latest']} available, can't auto-install: " . implode(' ', self::problems());
+            return "update $what available, can't auto-install: " . implode(' ', self::problems());
         }
-        $r = self::install((string) $info['latest'], null);
-        return "installed {$r['to']}";
+        $r = self::install((string) $info['sha'], null);
+        return "installed {$r['to']} (" . substr($r['sha'], 0, 7) . ')';
     }
 
     /** @return resource */
@@ -456,12 +543,12 @@ final class SelfUpdate
         }
         foreach (self::REQUIRED as $req) {
             if (!isset($files[$req])) {
-                throw new \RuntimeException("The archive has no $req, so it isn't a Kiosky Shepherd release.");
+                throw new \RuntimeException("The archive has no $req, so it isn't Kiosky Shepherd.");
             }
         }
         $boot = (string) $zip->getFromIndex($files['src/bootstrap.php']);
         if (!preg_match("/define\('SHEPHERD_VERSION', '([^']+)'\)/", $boot, $m) || $m[1] !== $version) {
-            throw new \RuntimeException("The archive says it is version " . ($m[1] ?? 'unknown') . ", not $version.");
+            throw new \RuntimeException('The archive says it is version ' . ($m[1] ?? 'unknown') . ", not $version.");
         }
         return [$zip, $files];
     }
@@ -510,6 +597,8 @@ final class SelfUpdate
         foreach (self::currentFiles() as $rel) {
             $zip->addFile(SHEPHERD_ROOT . '/' . $rel, $rel);
         }
+        // Remember which build this was, so a rollback knows the commit again
+        $zip->setArchiveComment((string) json_encode(self::installed(), JSON_UNESCAPED_SLASHES));
         if (!$zip->close()) {
             throw new \RuntimeException('Writing the backup failed (is the disk full?).');
         }
@@ -525,7 +614,7 @@ final class SelfUpdate
         try {
             for ($i = 0; $i < $zip->numFiles; $i++) {
                 $rel = (string) $zip->getNameIndex($i);
-                if (str_ends_with($rel, '/') || !self::managed($rel) || preg_match('#(^|/)\.\.(/|$)#', $rel) || $rel[0] === '/') {
+                if ($rel === '' || str_ends_with($rel, '/') || !self::managed($rel) || preg_match('#(^|/)\.\.(/|$)#', $rel) || $rel[0] === '/') {
                     continue;
                 }
                 self::writeFile($rel, (string) $zip->getFromIndex($i));

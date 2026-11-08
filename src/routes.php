@@ -52,6 +52,8 @@ return static function (Router $r): void {
     $r->get("$a/audit", [OverviewApi::class, 'audit']);
     $r->post("$a/alerts/test", [OverviewApi::class, 'testAlerts']);
     $r->get("$a/system/network", [SystemApi::class, 'network']);
+    $r->get("$a/system/mail", [SystemApi::class, 'mail']);
+    $r->post("$a/system/mail/test", [SystemApi::class, 'testMail']);
     $r->get("$a/system/settings", [SystemApi::class, 'settings']);
     $r->patch("$a/system/settings", [SystemApi::class, 'saveSettings']);
     $r->get("$a/system/update", [SystemApi::class, 'status']);

@@ -9,6 +9,10 @@ use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
 use Shepherd\Http\TrustedProxies;
+use Shepherd\Audit;
+use Shepherd\Config;
+use Shepherd\Db;
+use Shepherd\Mailer;
 use Shepherd\SelfUpdate;
 use Shepherd\Settings;
 
@@ -33,6 +37,38 @@ final class SystemApi
         return Response::json(['changed' => $changed] + Settings::describe());
     }
 
+    /** GET /api/v1/admin/system/mail  how email is sent (never the password) */
+    public static function mail(Request $req): Response
+    {
+        $p = AdminAuth::require($req, 'admin');
+        $me = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $p->adminId]) ?? [];
+        $alertTo = Config::get('alerts.email', []);
+        return Response::json(Mailer::summary() + [
+            'alert_recipients' => is_array($alertTo) ? array_values($alertTo) : (is_string($alertTo) ? [$alertTo] : []),
+            'your_email' => is_string($me['email'] ?? null) ? $me['email'] : null,
+        ]);
+    }
+
+    /** POST /api/v1/admin/system/mail/test  {to}: sends a test email and reports the server's answer */
+    public static function testMail(Request $req): Response
+    {
+        $p = AdminAuth::require($req, 'admin');
+        \Shepherd\RateLimiter::hit('mail-test:' . $p->adminId, 10, 600);
+        $to = trim((string) $req->input('to', ''));
+        if (filter_var($to, FILTER_VALIDATE_EMAIL) === false) {
+            throw HttpError::validation(['to' => 'Enter the address to send the test to.']);
+        }
+        try {
+            Mailer::send([$to], 'Test email', "This is a test from Kiosky Shepherd, sent by {$p->name}.\n\n"
+                . 'If it arrived, offline alerts by email will arrive the same way.');
+        } catch (\Throwable $e) {
+            Audit::log($p, 'mail.test_failed', null, null, ['to' => $to, 'error' => $e->getMessage()]);
+            throw new HttpError(502, 'mail_failed', $e->getMessage());
+        }
+        Audit::log($p, 'mail.tested', null, null, ['to' => $to, 'transport' => Mailer::transport()]);
+        return Response::json(['ok' => true, 'transport' => Mailer::transport()]);
+    }
+
     /** GET /api/v1/admin/system/network  how this request reached the server (reverse proxy / CDN diagnostics) */
     public static function network(Request $req): Response
     {
@@ -55,16 +91,16 @@ final class SystemApi
         return Response::json(SelfUpdate::status());
     }
 
-    /** POST /api/v1/admin/system/update/install  {version}: must be the newest release from the last check */
+    /** POST /api/v1/admin/system/update/install  {sha}: the newest commit on the channel's branch, from the last check */
     public static function install(Request $req): Response
     {
         $p = AdminAuth::require($req, 'admin');
-        $version = $req->input('version');
-        if (!is_string($version) || $version === '') {
-            throw HttpError::validation(['version' => 'Say which version to install.']);
+        $sha = $req->input('sha');
+        if (!is_string($sha) || !preg_match('/^[0-9a-f]{40}$/', $sha)) {
+            throw HttpError::validation(['sha' => 'Say which commit to install.']);
         }
         try {
-            $result = SelfUpdate::install($version, $p);
+            $result = SelfUpdate::install($sha, $p);
         } catch (HttpError $e) {
             throw $e;
         } catch (\Throwable $e) {

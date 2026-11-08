@@ -118,6 +118,16 @@ jobs:
           mysql -h127.0.0.1 -uroot -proot shepherd -e "INSERT INTO releases (version_name, version_code, sha256, size, file_name, channel)
             VALUES ('1.0.0', 100, REPEAT('a', 64), 1, 'missing.apk', 'stable'), ('1.1.0-dev.1', 110, REPEAT('b', 64), 1, 'missing.apk', 'dev')"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start a test SMTP server
+        run: |
+          pip install --quiet aiosmtpd
+          python -u -m aiosmtpd -n -l 127.0.0.1:2525 -c aiosmtpd.handlers.Debugging > "$RUNNER_TEMP/smtp.log" 2>&1 &
+          sleep 2
+
       - name: Start the server
         run: |
           php -S 127.0.0.1:8080 index.php > "$RUNNER_TEMP/server.log" 2>&1 &
@@ -126,6 +136,12 @@ jobs:
 
       - name: Smoke test
         run: php tests/smoke.php http://127.0.0.1:8080 ci ci-password-123
+
+      - name: The test email arrived over SMTP
+        run: |
+          cat "$RUNNER_TEMP/smtp.log"
+          grep -q 'X-Mailer: KioskyShepherd' "$RUNNER_TEMP/smtp.log"
+          grep -qi 'To: ci@example.com' "$RUNNER_TEMP/smtp.log"
 
       - name: Cron runs a due schedule
         run: |

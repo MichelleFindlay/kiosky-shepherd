@@ -53,7 +53,7 @@ final class Settings
         'alerts.offline_minutes' => ['type' => 'int', 'min' => 5, 'max' => 1440, 'group' => 'Offline alerts',
             'label' => 'Report a device offline after (minutes)', 'help' => ''],
         'alerts.email' => ['type' => 'emails', 'group' => 'Offline alerts', 'label' => 'Email addresses',
-            'help' => 'One per line. Sent with PHP mail().'],
+            'help' => 'One per line. Sent through the SMTP server in config.php, or PHP mail() when there is none (see Email below).'],
         'alerts.email_from' => ['type' => 'email', 'group' => 'Offline alerts', 'label' => 'Send email from',
             'help' => 'An address on your domain, so messages don\'t land in spam. Empty: kiosky-shepherd@<server>.'],
         'alerts.webhooks' => ['type' => 'webhooks', 'group' => 'Offline alerts', 'label' => 'Webhooks',
@@ -63,15 +63,16 @@ final class Settings
 
         // --- Updates -------------------------------------------------------------
         'self_update.auto' => ['type' => 'bool', 'group' => 'Kiosky Shepherd updates', 'label' => 'Install new releases automatically',
-            'help' => 'bin/cron.php installs new stable releases by itself. Needs installing from the console to be allowed in config.php.'],
-        'self_update.prereleases' => ['type' => 'bool', 'group' => 'Kiosky Shepherd updates', 'label' => 'Offer pre-releases',
-            'help' => 'Versions such as 1.6.0-beta.1.'],
+            'help' => 'bin/cron.php installs each new build on the channel\'s branch by itself (every 6 hours at most). Never installs an older version. Needs installing from the console to be allowed in config.php.'],
+        'self_update.channel' => ['type' => 'enum', 'values' => ['stable', 'dev'], 'group' => 'Kiosky Shepherd updates',
+            'label' => 'Update channel',
+            'help' => 'stable follows the main branch; dev follows the dev branch (newest changes first, less tested).'],
     ];
 
     /** Shown on the page, so admins know where the rest lives. */
     public const FILE_ONLY = [
         'Server address (base_url)', 'Database connection', 'Single sign-on providers and secrets', 'setup_key', 'Password sign-in on/off',
-        'Trusted proxies', 'Session cookie settings', 'Storage folder', 'Kiosky package name',
+        'Trusted proxies', 'SMTP server and its password', 'Session cookie settings', 'Storage folder', 'Kiosky package name',
         'Where updates come from, and whether the console may install them',
     ];
 
@@ -100,7 +101,8 @@ final class Settings
             'alerts.email', 'alerts.webhooks' => [],
             'alerts.email_from' => '',
             'alerts.ignore_tags' => ['no-alerts'],
-            'self_update.auto', 'self_update.prereleases' => false,
+            'self_update.auto' => false,
+            'self_update.channel' => 'stable',
             default => null,
         };
     }
@@ -220,6 +222,11 @@ final class Settings
                 $v = is_string($v) ? trim($v) : '';
                 if ($v === '' || mb_strlen($v) > $def['max'] || preg_match('/[\x00-\x1F\x7F]/', $v)) {
                     $err = "Enter up to {$def['max']} characters.";
+                }
+                return $v;
+            case 'enum':
+                if (!is_string($v) || !in_array($v, $def['values'], true)) {
+                    $err = 'Use ' . implode(' or ', $def['values']) . '.';
                 }
                 return $v;
             case 'timezone':

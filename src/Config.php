@@ -36,6 +36,7 @@ final class Config
         // array_replace_recursive() can't replace a default list with an empty one
         'alerts' => [],
         'self_update' => [],
+        'mail' => [],
     ];
 
     /** @var array<string, mixed> */

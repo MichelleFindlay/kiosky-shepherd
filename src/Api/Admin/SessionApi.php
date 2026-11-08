@@ -211,7 +211,8 @@ final class SessionApi
             $server['pending_migrations'] = Migrator::pending();
             // From the last check only; the session never waits for GitHub
             $u = \Shepherd\SelfUpdate::cached();
-            $server['update'] = $u === null ? null : ['latest' => $u['latest'] ?? null, 'available' => $u['available']];
+            $server['update'] = $u === null ? null : ['latest' => $u['latest'] ?? null, 'available' => (bool) ($u['available'] ?? false),
+                'channel' => $u['channel'] ?? null, 'sha' => isset($u['sha']) ? substr((string) $u['sha'], 0, 7) : null];
         }
         $twoFactor = null;
         $recoveryLeft = null;

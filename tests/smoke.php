@@ -343,6 +343,15 @@ check($n['client_ip'] === '127.0.0.1', 'a malformed chain falls back to the conn
 $n = $net(['CF-Visitor: {"scheme":"https"}', 'CF-Ray: abc']);
 check($n['https'] === true && $n['via'] === 'cloudflare', 'Cloudflare\'s CF-Visitor marks HTTPS', $n);
 
+// ---- Email over SMTP (the workflow runs a test SMTP server on 127.0.0.1:2525) -----
+$ml = expect($admin, 200, 'GET', "$A/system/mail");
+check(!array_key_exists('password', $ml), 'mail settings are shown without secrets', $ml);
+expect($admin, 422, 'POST', "$A/system/mail/test", ['to' => 'not-an-address']);
+if (getenv('CI') !== false) {
+    check($ml['transport'] === 'smtp' && $ml['host'] === '127.0.0.1' && $ml['port'] === 2525, 'the SMTP server from config.php is used', $ml);
+    expect($admin, 200, 'POST', "$A/system/mail/test", ['to' => 'ci@example.com']);
+}
+
 // ---- Server settings (storage/settings.json over config.php) ----------------------
 $st = expect($admin, 200, 'GET', "$A/system/settings");
 $byKey = array_column($st['settings'], null, 'key');
@@ -357,7 +366,10 @@ $sv = expect($admin, 200, 'PATCH', "$A/system/settings", ['retention_days' => 30
 check(count($sv['changed']) === 2, 'settings are saved', $sv['changed']);
 $ov = expect($admin, 200, 'GET', "$A/overview");
 check($ov['alerts']['webhooks'] === ['json'], 'a saved setting takes effect straight away', $ov['alerts']);
-expect($admin, 200, 'PATCH', "$A/system/settings", ['retention_days' => null, 'alerts.webhooks' => null]);
+expect($admin, 422, 'PATCH', "$A/system/settings", ['self_update.channel' => 'beta']);
+expect($admin, 200, 'PATCH', "$A/system/settings", ['self_update.channel' => 'dev']);
+check(expect($admin, 200, 'GET', "$A/system/update")['channel'] === 'dev', 'the update channel can be switched to dev');
+expect($admin, 200, 'PATCH', "$A/system/settings", ['retention_days' => null, 'alerts.webhooks' => null, 'self_update.channel' => null]);
 $st = expect($admin, 200, 'GET', "$A/system/settings");
 $byKey = array_column($st['settings'], null, 'key');
 check($byKey['retention_days']['value'] === 90 && !$byKey['retention_days']['overridden'], 'reset goes back to config.php');
@@ -373,9 +385,12 @@ expect($api, 403, 'POST', "$A/profiles", ['name' => 'nope']);
 expect($api, 403, 'GET', "$A/system/update");
 expect($api, 403, 'GET', "$A/system/settings");
 expect($api, 403, 'GET', "$A/system/network");
+expect($api, 403, 'POST', "$A/system/mail/test", ['to' => 'ci@example.com']);
 $su = expect($admin, 200, 'GET', "$A/system/update");
 check($su['current'] === $h['version'] && is_array($su['problems']) && is_array($su['backups']), 'update status reports the installed version', $su);
-$inst = $admin->call('POST', "$A/system/update/install", ['version' => '99.0.0']);
+check($su['channel'] === 'stable' && $su['branches'] === ['stable' => 'main', 'dev' => 'dev'], 'channels follow main and dev', $su);
+expect($admin, 422, 'POST', "$A/system/update/install", ['sha' => 'not-a-commit']);
+$inst = $admin->call('POST', "$A/system/update/install", ['sha' => str_repeat('a', 40)]);
 check($inst['status'] === 409, 'installing refuses when it can\'t safely update', $inst['body']);
 expect($admin, 404, 'POST', "$A/system/update/rollback", ['backup' => '../../config/config.php']);
 

@@ -181,7 +181,7 @@ final class Alerts
         $results = [];
         $emails = self::emails();
         if ($emails !== []) {
-            $results[] = self::attempt('email', static fn () => self::sendEmail($emails, $title, $text . "\n\n" . $console));
+            $results[] = self::attempt(Mailer::transport() === 'smtp' ? 'email (SMTP)' : 'email', static fn () => self::sendEmail($emails, $title, $text . "\n\n" . $console));
         }
         foreach (self::webhooks() as $w) {
             $results[] = self::attempt($w['type'] . ' webhook',
@@ -204,21 +204,7 @@ final class Alerts
     /** @param list<string> $to */
     private static function sendEmail(array $to, string $subject, string $body): void
     {
-        $from = (string) Config::get('alerts.email_from', '');
-        if ($from === '') {
-            $host = (string) (parse_url(Util::baseUrl(), PHP_URL_HOST) ?: 'localhost');
-            $from = 'kiosky-shepherd@' . $host;
-        }
-        $headers = [
-            'From' => 'Kiosky Shepherd <' . $from . '>',
-            'Content-Type' => 'text/plain; charset=UTF-8',
-            'Content-Transfer-Encoding' => '8bit',
-            'X-Mailer' => 'KioskyShepherd/' . SHEPHERD_VERSION,
-        ];
-        $subject = mb_encode_mimeheader('[Kiosky Shepherd] ' . $subject, 'UTF-8');
-        if (!mail(implode(', ', $to), $subject, $body, $headers)) {
-            throw new \RuntimeException('PHP mail() refused the message. Check the host\'s mail settings.');
-        }
+        Mailer::send($to, $subject, $body); // SMTP or PHP mail(), see 'mail' in config.php
     }
 
     /** @param array{type: string, url: string, headers: array<string, string>} $w */

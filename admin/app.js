@@ -235,13 +235,13 @@ function page(title, ...headExtras) {
   return mainEl;
 }
 
-// After an upgrade, admins can apply new database migrations here instead of over SSH
-// Admins hear about a new Kiosky Shepherd release on every page (from cron's last check)
+// Admins hear about a new Kiosky Shepherd build on every page (from cron's last check)
 function updateBanner() {
   const u = state.server && state.server.update;
   if (!u || !u.available || !can('admin') || location.hash === '#/server') return null;
+  const what = u.channel === 'dev' ? `A new dev build (${u.latest}, ${u.sha})` : `Kiosky Shepherd ${u.latest}`;
   return h('div', { class: 'card banner' },
-    h('div', {}, h('strong', {}, `Kiosky Shepherd ${u.latest} is available. `), `You have ${state.server.version}.`),
+    h('div', {}, h('strong', {}, `${what} is available. `), `You have ${state.server.version}.`),
     h('a', { class: 'btn small primary', href: '#/server' }, 'Review and install'));
 }
 
@@ -249,18 +249,24 @@ async function viewServer() {
   page('Server');
   const box = h('div', { class: 'stack' });
   mainEl.append(box);
+  const short = (sha) => (sha ? sha.slice(0, 7) : '');
   const render = (st) => {
     clear(box);
-    const c = st.check;
+    // A check made for the other channel (just switched) counts as not checked yet
+    const c = st.check && st.check.sha && st.check.channel === st.channel ? st.check : null;
     const card = h('div', { class: 'card' }, h('h2', {}, 'Kiosky Shepherd updates'));
     card.append(h('dl', { class: 'kv' },
-      h('dt', {}, 'Installed'), h('dd', {}, st.current),
-      h('dt', {}, 'Newest release'), h('dd', {}, c && c.latest ? [c.latest, c.prerelease ? ' (pre-release)' : '',
-        c.url ? [' · ', h('a', { href: c.url, target: '_blank', rel: 'noopener noreferrer' }, 'on GitHub')] : null] : 'not checked yet'),
-      h('dt', {}, 'Last checked'), h('dd', {}, c && c.checked_at ? when(c.checked_at) : 'never',
-        c && c.error ? h('div', { class: 'error-text' }, c.error) : null),
+      h('dt', {}, 'Installed'), h('dd', {}, st.current,
+        st.installed.sha ? h('span', { class: 'sub mono' }, ` ${short(st.installed.sha)}${st.installed.branch ? ' on ' + st.installed.branch : ''}`)
+          : h('span', { class: 'sub' }, ' (exact build unknown: uploaded by hand)')),
+      h('dt', {}, 'Channel'), h('dd', {}, st.channel === 'dev' ? 'dev' : 'stable',
+        h('span', { class: 'sub' }, ` follows the ${st.branches[st.channel]} branch · change it under Settings below`)),
+      h('dt', {}, 'Newest build'), h('dd', {}, c ? [c.latest, ' ', h('a', { class: 'mono', href: c.url, target: '_blank', rel: 'noopener noreferrer' }, short(c.sha)),
+        c.committed_at ? h('span', { class: 'sub' }, ` · ${dateTime(c.committed_at)}`) : null] : 'not checked yet'),
+      h('dt', {}, 'Last checked'), h('dd', {}, st.check && st.check.checked_at ? when(st.check.checked_at) : 'never',
+        st.check && st.check.error ? h('div', { class: 'error-text' }, st.check.error) : null),
       h('dt', {}, 'Source'), h('dd', {}, h('code', {}, st.repo)),
-      h('dt', {}, 'Automatic install'), h('dd', {}, st.auto ? 'On: cron installs new stable releases' : 'Off (self_update.auto)')));
+      h('dt', {}, 'Automatic install'), h('dd', {}, st.auto ? `On: cron installs new builds from ${st.branches[st.channel]}` : 'Off (change it under Settings below)')));
 
     const checkBtn = h('button', { class: 'small' }, 'Check now');
     checkBtn.addEventListener('click', async () => {
@@ -271,25 +277,35 @@ async function viewServer() {
     card.append(actions);
 
     if (c && c.available) {
-      if (c.notes) card.append(h('h3', {}, `What's new in ${c.latest}`), h('pre', { class: 'release-notes' }, c.notes));
+      if (c.downgrade) card.append(h('p', {}, h('span', { class: 'chip warn' }, 'Older'), ` ${c.branch} has ${c.latest}, older than the installed ${st.current}. `
+        + 'Installing it switches back; database changes stay. It is never installed automatically.'));
+      if (c.unknown_build) card.append(h('p', { class: 'sub' }, `This server's exact build isn't known (it was uploaded by hand), so installing syncs it with ${c.branch}.`));
+      if (c.commits && c.commits.length) {
+        card.append(h('h3', {}, `${c.behind || c.commits.length} change${(c.behind || c.commits.length) === 1 ? '' : 's'} since your build`),
+          h('ul', { class: 'commits' }, c.commits.map((x) => h('li', {}, h('code', {}, x.sha), ' ', x.message))));
+      } else if (c.message) {
+        card.append(h('h3', {}, 'Newest change'), h('p', {}, c.message.split('\n')[0]));
+      }
+      if (c.notes) card.append(h('h3', {}, `Release notes for ${c.latest}`), h('pre', { class: 'release-notes' }, c.notes));
       if (st.problems.length) {
         card.append(h('h3', {}, 'Can\'t install from here'), h('ul', {}, st.problems.map((p) => h('li', { class: 'error-text' }, p))),
-          h('p', { class: 'sub' }, 'You can still update by uploading the release\'s files over the old ones (keep config/config.php and storage/).'));
+          h('p', { class: 'sub' }, 'You can still update by uploading the new files over the old ones (keep config/config.php and storage/).'));
       } else {
-        const install = h('button', { class: 'primary' }, `Install ${c.latest}`);
+        const label = `Install ${c.latest} (${short(c.sha)})`;
+        const install = h('button', { class: 'primary' }, label);
         install.addEventListener('click', async () => {
-          if (!window.confirm(`Install Kiosky Shepherd ${c.latest}? The current files are backed up first, and the console reloads when it's done.`)) return;
+          if (!window.confirm(`Install Kiosky Shepherd ${c.latest} from ${c.branch} (${short(c.sha)})? The current files are backed up first, and the console reloads when it's done.`)) return;
           install.disabled = true;
           install.textContent = 'Installing… (this can take a minute)';
           checkBtn.disabled = true;
           try {
-            const r = await api.post('/admin/system/update/install', { version: c.latest });
-            toast(`Installed ${r.to}. Reloading…`);
+            const r = await api.post('/admin/system/update/install', { sha: c.sha });
+            toast(`Installed ${r.to} (${short(r.sha)}). Reloading…`);
             setTimeout(() => location.reload(), 1500);
           } catch (ex) {
             fail(ex);
             install.disabled = false;
-            install.textContent = `Install ${c.latest}`;
+            install.textContent = label;
             checkBtn.disabled = false;
           }
         });
@@ -297,14 +313,16 @@ async function viewServer() {
         card.append(h('p', { class: 'sub' }, 'The current files are zipped into storage/backups first. config/config.php and storage/ are never changed. '
           + 'Database updates in the new version apply on the next page load.'));
       }
-    } else if (c && c.latest) {
-      card.append(h('p', {}, h('span', { class: 'chip ok' }, 'Up to date')));
+    } else if (c) {
+      card.append(h('p', {}, h('span', { class: 'chip ok' }, 'Up to date'), ` with ${c.branch}.`));
     }
     box.append(card);
 
     if (st.last) {
       box.append(h('div', { class: 'card' }, h('h2', {}, 'Last change'),
-        h('p', {}, st.last.action === 'installed' ? `Updated from ${st.last.from} to ${st.last.to}` : `Rolled back from ${st.last.from} to ${st.last.to}`,
+        h('p', {}, st.last.action === 'installed'
+          ? `Updated from ${st.last.from} to ${st.last.to}${st.last.sha ? ` (${short(st.last.sha)} on ${st.last.branch})` : ''}`
+          : `Rolled back from ${st.last.from} to ${st.last.to}`,
           ` by ${st.last.by}, `, when(st.last.at), '.')));
     }
 
@@ -332,10 +350,47 @@ async function viewServer() {
     box.append(backups);
   };
   const syncBanner = (st) => {
-    if (state.server && st.check) state.server.update = { latest: st.check.latest, available: st.check.available };
+    if (state.server && st.check) {
+      state.server.update = { latest: st.check.latest, available: !!st.check.available, channel: st.check.channel, sha: short(st.check.sha) };
+    }
   };
   render(await api.get('/admin/system/update'));
-  mainEl.append(serverSettingsCard(), networkCard());
+  mainEl.append(serverSettingsCard(), emailCard(), networkCard());
+}
+
+// How email is sent (SMTP or PHP mail()), with a test
+function emailCard() {
+  const card = h('div', { class: 'card stack-gap' }, h('h2', {}, 'Email'));
+  api.get('/admin/system/mail').then((m) => {
+    const ENC = { starttls: 'STARTTLS', tls: 'TLS', none: 'none (unencrypted)' };
+    card.append(h('dl', { class: 'kv' },
+      h('dt', {}, 'Sent with'), h('dd', {}, m.transport === 'smtp' ? `SMTP server ${m.host}:${m.port}` : 'PHP mail() on this server'),
+      m.transport === 'smtp' ? [
+        h('dt', {}, 'Encryption'), h('dd', {}, ENC[m.encryption] || m.encryption),
+        h('dt', {}, 'Sign-in'), h('dd', {}, m.auth ? m.username : 'none'),
+      ] : null,
+      h('dt', {}, 'From'), h('dd', {}, `${m.from_name} <${m.from}>`),
+      h('dt', {}, 'Alert recipients'), h('dd', {}, m.alert_recipients.length ? m.alert_recipients.join(', ') : 'none')),
+    h('p', { class: 'sub' }, 'The SMTP server is set under ', h('code', {}, "'mail'"), ' in config/config.php only, because whoever controls '
+      + 'the server address would receive its password.'));
+    const to = h('input', { type: 'email', required: true, value: m.your_email || m.alert_recipients[0] || '', placeholder: 'you@example.com' });
+    const btn = h('button', { class: 'primary', type: 'submit' }, 'Send test email');
+    card.append(h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        btn.disabled = true;
+        btn.textContent = 'Sending…';
+        try {
+          await api.post('/admin/system/mail/test', { to: to.value });
+          toast(`Sent to ${to.value}. Check the inbox (and spam folder).`);
+        } catch (ex) { fail(ex); } finally {
+          btn.disabled = false;
+          btn.textContent = 'Send test email';
+        }
+      },
+    }, h('div', { class: 'row' }, field('Send a test to', to), h('div', { class: 'field' }, btn))));
+  }).catch((ex) => card.append(h('div', { class: 'error-text' }, ex.message)));
+  return card;
 }
 
 // How requests reach the server: reverse proxy / CDN (Cloudflare…) diagnostics
@@ -451,6 +506,10 @@ function settingControl(s, webhookTypes) {
         return n;
       };
       break;
+    case 'enum':
+      el = h('select', {}, s.values.map((v) => h('option', { value: v, selected: v === s.value }, v)));
+      get = () => el.value;
+      break;
     case 'emails':
       el = h('textarea', { placeholder: 'it@example.com' });
       el.value = (s.value || []).join('\n');
@@ -492,6 +551,7 @@ function settingControl(s, webhookTypes) {
   return { el, get, disable: () => { el.disabled = true; } };
 }
 
+// After an upgrade, admins can apply new database migrations here instead of over SSH
 function migrationBanner() {
   const pending = state.server && state.server.pending_migrations;
   if (!pending || !pending.length) return null;

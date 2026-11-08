@@ -296,9 +296,32 @@ devices and devices tagged `no-alerts` (`ignore_tags`) are left out.
 | `ntfy` | Plain text with a title, to an [ntfy](https://ntfy.sh) topic URL |
 | `json` | `{"event": "devices_offline" \| "devices_online" \| "test", "title", "text", "devices": [{id, name, last_seen_at}], "console", "server", "sent_at"}` |
 
-Each webhook can add `'headers' => ['Authorization' => '…']`. Email uses PHP's
-`mail()`, which most shared hosts support; set `email_from` to an address on your
-domain if messages land in spam.
+Each webhook can add `'headers' => ['Authorization' => '…']`.
+
+### Email and SMTP
+
+Alert emails go through PHP's `mail()` unless you configure an SMTP server under
+`mail` in `config/config.php`:
+
+```php
+'mail' => [
+    'transport' => 'smtp',
+    'host' => 'smtp.example.com',
+    'port' => 587,
+    'encryption' => 'starttls',   // or 'tls' for port 465, 'none' for a local relay
+    'username' => 'kiosks@example.com',
+    'password' => '…',
+    'from' => 'kiosks@example.com',
+],
+```
+
+This works with Microsoft 365 / Exchange Online (`smtp.office365.com`, 587, with
+SMTP AUTH enabled for the mailbox), Google Workspace (`smtp.gmail.com`, 587, with an
+app password), Amazon SES, SendGrid, Mailgun, Postmark, your host's mail server and
+most others. Certificates are checked (`verify_peer`), and a password is never sent
+over an unencrypted connection except to this machine. **Server → Email** shows
+how mail is sent and sends a test message. The SMTP settings can only be set in
+config.php, because whoever controls the SMTP host would receive the password.
 
 ## Scheduled commands
 
@@ -357,21 +380,36 @@ console keeps their headers as long as the address isn't changed.
 
 ## Updating from the console
 
-Cron checks GitHub for a newer Kiosky Shepherd every 6 hours, and admins then see
-an "update available" banner. **Server** shows the installed and newest versions,
-the release notes, and **Install**. Installing:
+Kiosky Shepherd can update itself from GitHub, following one of two channels:
 
-1. downloads the release archive from the configured repository on GitHub (HTTPS,
-   GitHub's hosts only);
+| Channel | Follows | For |
+| --- | --- | --- |
+| `stable` (default) | the newest commit on `main` | production servers |
+| `dev` | the newest commit on `dev` | trying changes before they reach main |
+
+Choose the channel and whether to install automatically under **Server →
+Settings**. Cron checks every 6 hours; admins then see an "update available" banner,
+and **Server** shows the installed build, the newest one on the branch, the commits
+in between (and the release notes when that version has a GitHub release), and
+**Install**. With **Install new releases automatically** on, cron installs each new
+build on the branch by itself, so a server on `dev` stays on the newest dev build.
+The exact commit installed is recorded, so dev builds that keep the same version
+number are still picked up. Switching from dev back to an older stable version is
+offered but never installed automatically.
+
+Installing:
+
+1. downloads that commit's archive from the configured repository on GitHub
+   (HTTPS, GitHub's hosts only);
 2. checks it: no unsafe paths, the expected files present, and `src/bootstrap.php`
-   really is the version offered;
+   really is the version GitHub reported for that commit;
 3. zips the current files into `storage/backups/` (the last five are kept);
 4. writes the new files one at a time (each written aside, then renamed into
    place), leaving `config/config.php`, `storage/` and `.user.ini` alone. If writing
    fails part-way, the backup is put straight back;
 5. clears PHP's opcode cache. Database updates apply on the next page load.
 
-**Roll back** under **Server → Backups** restores an earlier version's files
+**Roll back** under **Server → Backups** restores an earlier build's files
 (database changes stay; older versions ignore what they don't know).
 
 It needs PHP's `curl` and `zip` extensions and write access to the project files,
@@ -380,14 +418,13 @@ under `self_update` in `config/config.php`:
 
 | Key | Default | |
 | --- | --- | --- |
-| `enabled` | `true` | `false` only reports new versions; the Install button is hidden |
-| `auto` | `false` | `true` lets `bin/cron.php` install new stable releases by itself |
-| `prereleases` | `false` | also offer versions such as `1.6.0-beta.1` |
-| `repo` | `MichelleFindlay/kiosky-shepherd` | where releases come from |
-| `github_token` | | only if GitHub rate-limits your server's IP address |
+| `enabled` | `true` | `false` only reports new builds; the Install button is hidden (file only) |
+| `channel` | `stable` | `stable` or `dev` (also in **Server → Settings**) |
+| `auto` | `false` | `true` lets `bin/cron.php` install new builds by itself (also in **Server → Settings**) |
+| `branches` | `['stable' => 'main', 'dev' => 'dev']` | the branch each channel follows (file only) |
+| `repo` | `MichelleFindlay/kiosky-shepherd` | where builds come from (file only) |
+| `github_token` | | only if GitHub rate-limits your server's IP address, or for a private repository |
 
-Releases are GitHub releases, or plain version tags (`v1.5.0`) when there are none.
-A release must be tagged on a commit whose `src/bootstrap.php` has that version.
 Copies installed with git (a `.git` folder) refuse, and should use `git pull`.
 
 ## Release channels
@@ -627,11 +664,13 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `GET /api/v1/admin/login-options` | none | Whether password sign-in is on, and the single sign-on providers |
 | `POST /api/v1/admin/migrate` | admin | Apply pending database migrations; `GET …/session` lists them under `server.pending_migrations` |
 | `POST /api/v1/admin/alerts/test` | admin | Send a test message to every alert channel |
+| `GET /api/v1/admin/system/mail` | admin | How email is sent (SMTP host, port, encryption, sender; never the password) |
+| `POST /api/v1/admin/system/mail/test` | admin | `{to}`: send a test email |
 | `GET /api/v1/admin/system/network` | admin | How your request reached the server: client IP, HTTPS, proxy headers, warnings |
 | `GET/PATCH /api/v1/admin/system/settings` | admin | Console-editable settings with their config.php values; `PATCH {key: value \| null}` (null resets) |
 | `GET /api/v1/admin/system/update` | admin | Installed version, last update check, what would stop an install, backups |
 | `POST /api/v1/admin/system/update/check` | admin | Check GitHub now |
-| `POST /api/v1/admin/system/update/install` | admin | `{version}`: install the newest release (must match the last check) |
+| `POST /api/v1/admin/system/update/install` | admin | `{sha}`: install the newest commit on the channel's branch (must match a fresh check) |
 | `POST /api/v1/admin/system/update/rollback` | admin | `{backup}`: restore the files from a backup |
 | `POST /api/v1/admin/session/2fa[/setup\|/enable\|/disable\|/recovery]` | console only | Second sign-in step, and managing your own two-factor sign-in |
 

@@ -14,4 +14,7 @@ return [
     'timezone' => 'Europe/London',
     // The smoke test fakes proxy headers from 127.0.0.1; without them it connects directly
     'trusted_proxies' => ['private', 'cloudflare'],
+    // A local test SMTP server (aiosmtpd) started by the workflow
+    'mail' => ['transport' => 'smtp', 'host' => '127.0.0.1', 'port' => 2525, 'encryption' => 'none',
+        'from' => 'shepherd@ci.example'],
 ];
