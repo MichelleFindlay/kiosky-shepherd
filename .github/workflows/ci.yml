@@ -128,6 +128,24 @@ jobs:
           python -u -m aiosmtpd -n -l 127.0.0.1:2525 -c aiosmtpd.handlers.Debugging > "$RUNNER_TEMP/smtp.log" 2>&1 &
           sleep 2
 
+      - name: Start a webhook receiver
+        run: |
+          cat > "$RUNNER_TEMP/hook.py" <<'PY'
+          import http.server, sys
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                  with open(sys.argv[1], 'ab') as f:
+                      f.write(b'X-Shepherd-Signature: ' + (self.headers.get('X-Shepherd-Signature') or '').encode() + b'\n' + body + b'\n')
+                  self.send_response(204)
+                  self.end_headers()
+              def log_message(self, *a):
+                  pass
+          http.server.HTTPServer(('127.0.0.1', 8099), H).serve_forever()
+          PY
+          python -u "$RUNNER_TEMP/hook.py" "$RUNNER_TEMP/hooks.log" &
+          sleep 1
+
       - name: Start the server
         run: |
           php -S 127.0.0.1:8080 index.php > "$RUNNER_TEMP/server.log" 2>&1 &
@@ -142,6 +160,13 @@ jobs:
           cat "$RUNNER_TEMP/smtp.log"
           grep -q 'X-Mailer: KioskyShepherd' "$RUNNER_TEMP/smtp.log"
           grep -qi 'To: ci@example.com' "$RUNNER_TEMP/smtp.log"
+
+      - name: Event webhooks arrived, signed
+        run: |
+          cat "$RUNNER_TEMP/hooks.log"
+          grep -q '"event":"test"' "$RUNNER_TEMP/hooks.log"
+          grep -q '"event":"device.enrolled"' "$RUNNER_TEMP/hooks.log"
+          grep -q 'X-Shepherd-Signature: sha256=' "$RUNNER_TEMP/hooks.log"
 
       - name: Cron runs a due schedule
         run: |

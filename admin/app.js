@@ -120,6 +120,10 @@ const api = {
       err.status = res.status;
       err.code = e.code;
       err.details = e.details;
+      if (e.code === 'two_factor_required' && state.me) {
+        state.me.must_setup_2fa = true;
+        if (location.hash !== '#/account') location.hash = '#/account';
+      }
       if (res.status === 401 && e.code === 'unauthorized' && path !== '/admin/session') {
         state.me = null;
         renderLogin();
@@ -355,7 +359,83 @@ async function viewServer() {
     }
   };
   render(await api.get('/admin/system/update'));
-  mainEl.append(serverSettingsCard(), emailCard(), networkCard());
+  mainEl.append(serverSettingsCard(), emailCard(), dbBackupsCard(), integrationsCard(), networkCard());
+}
+
+// Database backups as .sql.gz, downloadable (hosts without SSH have no other easy way)
+function dbBackupsCard() {
+  const card = h('div', { class: 'card stack-gap' }, h('h2', {}, 'Database backups'));
+  const body = h('div', {});
+  card.append(h('p', { class: 'sub' }, 'A copy of the whole database as gzipped SQL. Restore it by importing the file in phpMyAdmin. '
+    + 'Backups hold password hashes and two-factor secrets: keep downloaded copies safe. Turn on nightly backups under Settings.'), body);
+  const show = (r) => {
+    clear(body);
+    const make = h('button', { class: 'primary' }, 'Back up now');
+    make.addEventListener('click', async () => {
+      make.disabled = true;
+      make.textContent = 'Backing up…';
+      try { const x = await api.post('/admin/system/backups'); toast(`Saved ${x.name}.`); show({ ...r, items: x.items }); } catch (ex) { fail(ex); make.disabled = false; make.textContent = 'Back up now'; }
+    });
+    body.append(h('p', {}, r.nightly ? `Nightly backups are on; the newest ${r.keep} are kept.` : 'Nightly backups are off.'),
+      h('div', { class: 'actions' }, make));
+    if (r.items.length) {
+      body.append(h('div', { class: 'table-wrap' }, h('table', {}, h('tbody', {}, r.items.map((b) => h('tr', {},
+        h('td', { class: 'mono' }, b.name), h('td', {}, when(b.created_at)), h('td', { class: 'hide-sm' }, bytes(b.size)),
+        h('td', {}, h('div', { class: 'actions' },
+          h('a', { class: 'btn small', href: `/api/v1/admin/system/backups/${encodeURIComponent(b.name)}`, download: '' }, 'Download'),
+          h('button', {
+            class: 'small danger',
+            onclick: async () => {
+              if (!window.confirm(`Delete ${b.name}?`)) return;
+              try { await api.del(`/admin/system/backups/${encodeURIComponent(b.name)}`); show({ ...r, items: r.items.filter((x) => x.name !== b.name) }); } catch (ex) { fail(ex); }
+            },
+          }, 'Delete')))))))));
+    }
+  };
+  api.get('/admin/system/backups').then(show).catch((ex) => body.append(h('div', { class: 'error-text' }, ex.message)));
+  return card;
+}
+
+// Event webhooks, the weekly report and Prometheus metrics
+function integrationsCard() {
+  const card = h('div', { class: 'card stack-gap' }, h('h2', {}, 'Reports and integrations'));
+  const report = h('div', {});
+  const events = h('div', {});
+  card.append(h('h3', {}, 'Weekly report'), report, h('h3', {}, 'Event webhooks'), events, h('h3', {}, 'Prometheus'),
+    h('p', { class: 'sub' }, 'Scrape ', h('code', {}, `${location.origin}/metrics`), ' with an API token (viewer is enough) as ',
+      h('code', {}, 'bearer_token'), '. It reports each device\'s online state, last check-in, battery, Wi-Fi, 7-day uptime and policy state, plus pending commands and the last cron run.'));
+  api.get('/admin/system/report').then((r) => {
+    const send = h('button', { class: 'small' }, 'Send now');
+    send.addEventListener('click', async () => {
+      send.disabled = true;
+      try { const x = await api.post('/admin/system/report'); toast(`Report sent to ${x.sent_to} recipient${x.sent_to === 1 ? '' : 's'}.`); } catch (ex) { fail(ex); } finally { send.disabled = false; }
+    });
+    report.append(h('p', { class: 'sub' }, r.weekly ? `Emailed every Monday from 08:00 to ${r.recipients.join(', ') || 'nobody yet (add recipients)'}.`
+      : 'Off: turn it on under Settings.'),
+    h('details', {}, h('summary', { class: 'sub' }, `Preview: ${r.subject}`), h('pre', { class: 'release-notes' }, r.text)),
+    h('div', { class: 'actions' }, send));
+  }).catch((ex) => report.append(h('div', { class: 'error-text' }, ex.message)));
+  api.get('/admin/events').then((r) => {
+    const test = h('button', { class: 'small' }, 'Send a test event');
+    test.addEventListener('click', async () => {
+      test.disabled = true;
+      try { const x = await api.post('/admin/events/test'); toast(`Delivered ${x.delivered}.`); render(x.recent); } catch (ex) { fail(ex); } finally { test.disabled = false; }
+    });
+    const list = h('div', {});
+    const render = (items) => {
+      clear(list);
+      if (!items.length) { list.append(h('div', { class: 'empty' }, 'Nothing sent yet.')); return; }
+      list.append(h('div', { class: 'table-wrap' }, h('table', {}, h('tbody', {}, items.map((x) => h('tr', {},
+        h('td', {}, h('code', {}, x.event)), h('td', { class: 'trunc hide-sm' }, x.url),
+        h('td', {}, x.status === 'delivered' ? h('span', { class: 'chip ok' }, 'Delivered') : h('span', { class: 'chip ' + (x.status === 'pending' ? 'warn' : 'bad') }, x.status),
+          x.last_error ? h('div', { class: 'sub' }, x.last_error) : null),
+        h('td', {}, when(x.created_at))))))));
+    };
+    events.append(h('p', { class: 'sub' }, r.webhooks ? `${r.webhooks} webhook${r.webhooks === 1 ? '' : 's'} set up under Settings. Recent deliveries:`
+      : 'None set up: add them under Settings → Integrations.'), list, r.webhooks ? h('div', { class: 'actions' }, test) : null);
+    render(r.recent);
+  }).catch((ex) => events.append(h('div', { class: 'error-text' }, ex.message)));
+  return card;
 }
 
 // How email is sent (SMTP or PHP mail()), with a test
@@ -471,17 +551,24 @@ function serverSettingsCard() {
       show(r);
     } catch (ex) { fail(ex); }
   };
-  api.get('/admin/system/settings').then(show).catch((ex) => body.append(h('div', { class: 'error-text' }, ex.message)));
+  Promise.all([api.get('/admin/system/settings'), api.get('/admin/events').catch(() => ({ types: {} }))])
+    .then(([d, ev]) => { state.eventTypes = ev.types; show(d); })
+    .catch((ex) => body.append(h('div', { class: 'error-text' }, ex.message)));
   return card;
 }
 
 function settingText(s, v) {
   if (s.type === 'webhooks') return v.length ? v.map((w) => w.type).join(', ') : 'none';
+  if (s.type === 'event_webhooks') return v.length ? `${v.length} webhook${v.length === 1 ? '' : 's'}` : 'none';
+  if (s.type === 'choices') return (v || []).length ? v.map((k) => s.choices[k] || k).join(', ') : 'none';
   return fmtValue(v);
 }
 
 function normaliseForCompare(s, v) {
   if (s.type === 'webhooks') return (v || []).map((w) => ({ type: w.type, url: w.url }));
+  if (s.type === 'event_webhooks') return (v || []).map((w) => ({ url: w.url, secret: '', events: w.events || [] }));
+  if (s.type === 'choices') return v || [];
+  if (s.type === 'time') return v || '';
   if (s.type === 'emails' || s.type === 'tags') return v || [];
   // An unset text setting reads back as an empty field; don't count that as a change
   if (v == null && ['string', 'url', 'email', 'timezone'].includes(s.type)) return '';
@@ -510,6 +597,39 @@ function settingControl(s, webhookTypes) {
       el = h('select', {}, s.values.map((v) => h('option', { value: v, selected: v === s.value }, v)));
       get = () => el.value;
       break;
+    case 'time':
+      el = h('input', { type: 'time', value: s.value || '' });
+      get = () => el.value;
+      break;
+    case 'choices': {
+      const boxes = Object.entries(s.choices).map(([k, label]) => [k, h('input', { type: 'checkbox', checked: (s.value || []).includes(k) })]);
+      get = () => boxes.filter(([, b]) => b.checked).map(([k]) => k);
+      return { el: h('div', { class: 'choices' }, boxes.map(([k, b]) => h('label', { class: 'check' }, b, s.choices[k]))), get,
+        disable: () => boxes.forEach(([, b]) => { b.disabled = true; }) };
+    }
+    case 'event_webhooks': {
+      const list = h('div', { class: 'webhooks' });
+      const hooks = [];
+      const addRow = (w) => {
+        const url = h('input', { type: 'url', value: w.url || '', placeholder: 'https://…' });
+        const secret = h('input', { type: 'password', autocomplete: 'off', placeholder: w.has_secret ? 'secret set; type to replace' : 'secret (optional)' });
+        const events = Object.keys(state.eventTypes || {}).map((t) => [t, h('input', { type: 'checkbox', checked: !w.events || !w.events.length || w.events.includes(t) })]);
+        const row = h('div', { class: 'event-hook' }, h('div', { class: 'webhook-row' }, url, secret),
+          h('details', {}, h('summary', { class: 'sub' }, 'Events'), h('div', { class: 'choices' },
+            events.map(([t, b]) => h('label', { class: 'check', title: state.eventTypes[t] }, b, t)))));
+        const entry = { url, secret, events, row };
+        row.firstChild.append(h('button', { type: 'button', class: 'small', onclick: () => { hooks.splice(hooks.indexOf(entry), 1); row.remove(); } }, 'Remove'));
+        hooks.push(entry);
+        list.append(row);
+      };
+      (s.value || []).forEach(addRow);
+      const add = h('button', { type: 'button', class: 'small', onclick: () => addRow({}) }, 'Add event webhook');
+      get = () => hooks.filter((x) => x.url.value.trim()).map((x) => {
+        const chosen = x.events.filter(([, b]) => b.checked).map(([t]) => t);
+        return { url: x.url.value.trim(), secret: x.secret.value, events: chosen.length === x.events.length ? [] : chosen };
+      });
+      return { el: h('div', {}, list, add), get, disable: () => { add.disabled = true; } };
+    }
     case 'emails':
       el = h('textarea', { placeholder: 'it@example.com' });
       el.value = (s.value || []).join('\n');
@@ -608,7 +728,7 @@ async function renderLogin() {
       err.hidden = true;
       try {
         const r = await api.post('/admin/session', { username: user.value, password: pass.value });
-        if (r.two_factor_required) renderSecondFactor();
+        if (r.two_factor_required) renderSecondFactor(r.methods || ['totp']);
         else signedIn(r);
       } catch (ex) {
         err.textContent = ex.message;
@@ -618,8 +738,17 @@ async function renderLogin() {
   },
   field('Username', user), field('Password', pass), err,
   h('button', { class: 'primary', type: 'submit' }, 'Sign in')) : null;
-  const sso = options.providers.length ? h('div', { class: 'sso' },
-    options.providers.map((p) => h('a', { class: 'btn', href: p.url }, p.label))) : null;
+  const ssoLinks = options.providers.map((p) => h('a', { class: 'btn', href: p.url }, p.label));
+  if (options.passkeys && window.PublicKeyCredential) {
+    ssoLinks.push(h('button', {
+      type: 'button', class: 'btn',
+      onclick: async () => {
+        err.hidden = true;
+        try { signedIn(await passkeySignIn('login')); } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+      },
+    }, 'Sign in with a passkey'));
+  }
+  const sso = ssoLinks.length ? h('div', { class: 'sso' }, ssoLinks) : null;
   clear(document.getElementById('app')).append(h('div', { class: 'login' },
     h('div', { class: 'card' }, logo(), h('h1', {}, 'Kiosky Shepherd'), h('p', { class: 'sub' }, 'Sign in to manage your kiosks.'),
       setupError ? h('p', { class: 'error-text' }, setupError) : null,
@@ -629,30 +758,83 @@ async function renderLogin() {
   if (form) user.focus();
 }
 
-// Second step of a password sign-in when the user has two-factor sign-in on
-function renderSecondFactor() {
-  const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: 16, class: 'code-input' });
+// Second step of a password sign-in: an authenticator code, a recovery code or a passkey
+function renderSecondFactor(methods) {
   const err = h('div', { class: 'error-text', hidden: true });
-  const form = h('form', {
-    onsubmit: async (e) => {
-      e.preventDefault();
-      err.hidden = true;
-      try {
-        signedIn(await api.post('/admin/session/2fa', { code: code.value }));
-      } catch (ex) {
-        if (ex.code === 'two_factor_expired') { renderLogin(); toast(ex.message, true); return; }
-        err.textContent = ex.message;
-        err.hidden = false;
-        code.select();
-      }
-    },
-  },
-  field('Code', code, 'The 6-digit code from your authenticator app, or one of your recovery codes.'), err,
-  h('button', { class: 'primary', type: 'submit' }, 'Verify'));
+  const show = (ex) => {
+    if (ex.code === 'two_factor_expired') { renderLogin(); toast(ex.message, true); return; }
+    err.textContent = ex.message;
+    err.hidden = false;
+  };
+  const parts = [];
+  const usePasskey = methods.includes('passkey') && window.PublicKeyCredential;
+  if (usePasskey) {
+    parts.push(h('button', {
+      type: 'button', class: methods.includes('totp') ? '' : 'primary',
+      onclick: async () => { err.hidden = true; try { signedIn(await passkeySignIn('second')); } catch (ex) { show(ex); } },
+    }, 'Use a passkey'));
+  }
+  let code = null;
+  if (methods.includes('totp')) {
+    code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: 16, class: 'code-input' });
+    if (usePasskey) parts.push(h('div', { class: 'or' }, 'or'));
+    parts.push(h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        try { signedIn(await api.post('/admin/session/2fa', { code: code.value })); } catch (ex) { show(ex); code.select(); }
+      },
+    }, field('Code', code, 'The 6-digit code from your authenticator app, or one of your recovery codes.'),
+    h('button', { class: 'primary', type: 'submit' }, 'Verify')));
+  }
   clear(document.getElementById('app')).append(h('div', { class: 'login' },
-    h('div', { class: 'card' }, logo(), h('h1', {}, 'Two-factor sign-in'), form,
+    h('div', { class: 'card' }, logo(), h('h1', {}, 'Two-factor sign-in'), err, ...parts,
       h('p', { class: 'sub' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, '← Use a different account')))));
-  code.focus();
+  if (code) code.focus();
+}
+
+/* Passkeys (WebAuthn): the browser API wants ArrayBuffers, the server speaks base64url */
+const b64u = {
+  toBuf: (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0)).buffer,
+  fromBuf: (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+};
+
+// mode 'login': a passkey alone; 'second': after the password
+async function passkeySignIn(mode) {
+  const o = await api.post('/admin/session/passkey/options', { mode });
+  const publicKey = { ...o, challenge: b64u.toBuf(o.challenge) };
+  if (o.allowCredentials) publicKey.allowCredentials = o.allowCredentials.map((c) => ({ ...c, id: b64u.toBuf(c.id) }));
+  let cred;
+  try { cred = await navigator.credentials.get({ publicKey }); } catch (e) { throw new Error('The passkey wasn\'t used (cancelled or timed out).'); }
+  return api.post('/admin/session/passkey', {
+    mode,
+    credential: {
+      id: b64u.fromBuf(cred.rawId),
+      clientDataJSON: b64u.fromBuf(cred.response.clientDataJSON),
+      authenticatorData: b64u.fromBuf(cred.response.authenticatorData),
+      signature: b64u.fromBuf(cred.response.signature),
+    },
+  });
+}
+
+async function passkeyRegister(name) {
+  const o = await api.post('/admin/session/passkeys/options');
+  const publicKey = {
+    ...o,
+    challenge: b64u.toBuf(o.challenge),
+    user: { ...o.user, id: b64u.toBuf(o.user.id) },
+    excludeCredentials: (o.excludeCredentials || []).map((c) => ({ ...c, id: b64u.toBuf(c.id) })),
+  };
+  let cred;
+  try { cred = await navigator.credentials.create({ publicKey }); } catch (e) { throw new Error('No passkey was created (cancelled, or this device already has one for this site).'); }
+  return api.post('/admin/session/passkeys', {
+    name,
+    credential: {
+      id: b64u.fromBuf(cred.rawId),
+      clientDataJSON: b64u.fromBuf(cred.response.clientDataJSON),
+      attestationObject: b64u.fromBuf(cred.response.attestationObject),
+    },
+  });
 }
 
 function logo() {
@@ -732,6 +914,8 @@ async function route() {
   const hash = location.hash || '#/overview';
   setMenu(false);
   highlightNav();
+  // A required second factor comes first: only Your account until it's set up
+  if (state.me.must_setup_2fa && hash !== '#/account') { location.hash = '#/account'; return; }
   for (const [re, view] of ROUTES) {
     const m = hash.match(re);
     if (m) {
@@ -813,10 +997,12 @@ function alertsLine(a) {
 }
 
 function alertsSummary(a) {
-  if (!a || !can('admin')) return null;
-  if (!a.email && !a.webhooks.length) {
-    return h('p', { class: 'sub' }, 'To be told when kiosks go offline, add email addresses or webhooks under ',
-      h('code', {}, "'alerts'"), ' in config/config.php.');
+  if (!a || !can('operator')) return null;
+  const silences = silencesBox(null);
+  if (!can('admin')) return silences;
+  if (!a.email && !a.webhooks.length && !a.push) {
+    return h('div', {}, h('p', { class: 'sub' }, 'To be told when kiosks go offline or have problems, add email addresses or webhooks under Server → Settings, '
+      + 'or turn on notifications under Your account.'), silences);
   }
   const btn = h('button', { class: 'small' }, 'Send test alert');
   btn.addEventListener('click', async () => {
@@ -828,8 +1014,47 @@ function alertsSummary(a) {
       else toast(bad.map((x) => `${x.channel}: ${x.error}`).join(' · '), true);
     } catch (ex) { fail(ex); } finally { btn.disabled = false; }
   });
-  return h('div', { class: 'actions' }, btn,
-    a.ignore_tags.length ? h('span', { class: 'sub' }, `Devices tagged ${a.ignore_tags.join(', ')} are never reported.`) : null);
+  return h('div', {}, h('div', { class: 'actions' }, btn,
+    a.ignore_tags.length ? h('span', { class: 'sub' }, `Devices tagged ${a.ignore_tags.join(', ')} are never reported.`) : null),
+  a.quiet_hours ? h('p', { class: 'sub' }, a.quiet_hours === 'now' ? 'Quiet hours now: alerts wait until they end.' : `Quiet hours ${a.quiet_hours}.`) : null,
+  silences);
+}
+
+// Active alert silences (maintenance), and controls to add one. deviceId: one device's page.
+function silencesBox(deviceId) {
+  const box = h('div', { class: 'silences' });
+  const SPANS = [[60, '1 hour'], [120, '2 hours'], [480, '8 hours'], [1440, '1 day'], [10080, '1 week']];
+  const load = async () => {
+    const r = await api.get('/admin/alerts/silences');
+    const mine = deviceId ? r.items.filter((x) => x.target_type === 'device' && x.target === String(deviceId)) : r.items;
+    clear(box);
+    for (const x of mine) {
+      box.append(h('div', { class: 'silence' }, h('span', { class: 'chip warn' }, 'Silenced'), ` ${x.target_label} until ${dateTime(x.until)}`,
+        x.note ? h('span', { class: 'sub' }, ` · ${x.note}`) : null, ' ',
+        h('button', { class: 'small', onclick: async () => { try { await api.del(`/admin/alerts/silences/${x.id}`); load().catch(fail); } catch (ex) { fail(ex); } } }, 'End')));
+    }
+    if (!can('operator') || (!deviceId && scoped())) return;
+    const span = h('select', {}, SPANS.map(([m, t]) => h('option', { value: m }, t)));
+    const note = h('input', { type: 'text', placeholder: 'why (optional)', maxlength: 255 });
+    let target = null;
+    if (!deviceId && !scoped()) {
+      target = h('input', { type: 'text', placeholder: 'tag, or empty for everything' });
+    }
+    box.append(h('form', {
+      class: 'silence-form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const body = { minutes: parseInt(span.value, 10), note: note.value };
+        if (deviceId) body.device_id = deviceId;
+        else if (target && target.value.trim()) body.tag = target.value.trim().toLowerCase();
+        else body.all = true;
+        try { await api.post('/admin/alerts/silences', body); toast('Alerts silenced.'); load().catch(fail); } catch (ex) { fail(ex); }
+      },
+    }, h('span', { class: 'sub' }, deviceId ? 'Silence alerts for this device for' : 'Silence alerts for'),
+    target, span, note, h('button', { class: 'small', type: 'submit' }, 'Silence')));
+  };
+  load().catch(() => {});
+  return box;
 }
 
 /* ------------------------------------------------------------------ devices */
@@ -895,7 +1120,8 @@ async function viewDevices(query) {
   const q = h('input', { type: 'search', placeholder: 'Search name, model, IP, notes…' });
   const profileSel = h('select', {}, h('option', { value: '' }, 'All profiles'), profiles.map((p) => h('option', { value: p.id }, p.name)));
   const statusSel = h('select', {}, h('option', { value: 'active' }, 'Active'), h('option', { value: 'retired' }, 'Retired'), h('option', { value: 'all' }, 'All'));
-  page('Devices', can('operator') && !scoped() ? h('a', { class: 'btn', href: '#/enroll' }, 'Enroll devices') : null);
+  const exportLink = h('a', { class: 'btn', href: '/api/v1/admin/devices/export', download: '' }, 'Export CSV');
+  page('Devices', exportLink, can('operator') && !scoped() ? h('a', { class: 'btn', href: '#/enroll' }, 'Enroll devices') : null);
 
   const selected = new Set();
   const tableBox = h('div', {});
@@ -932,6 +1158,7 @@ async function viewDevices(query) {
     if (q.value.trim()) params.set('q', q.value.trim());
     if (profileSel.value) params.set('profile_id', profileSel.value);
     if (tagSel.value) params.set('tag', tagSel.value);
+    exportLink.href = '/api/v1/admin/devices/export?' + params;
     const r = await api.get('/admin/devices?' + params);
     clear(tableBox);
     if (!r.items.length) {
@@ -1064,6 +1291,11 @@ function makeControl(def, value, releases, wasSet) {
       get = () => el.value;
       break;
     }
+    case 'urls':
+      el = h('textarea', { placeholder: 'one https:// address per line' });
+      el.value = Array.isArray(value) ? value.join('\n') : '';
+      get = () => el.value.split(/\s+/).map((x) => x.trim()).filter(Boolean);
+      break;
     case 'time':
       el = h('input', { type: 'time', value: value || '' });
       get = () => el.value;
@@ -1248,7 +1480,9 @@ async function viewDevice(id) {
 
   mainEl.append(h('div', { class: 'stack' },
     h('div', { class: 'grid grid-2' }, statusCard, infoCard),
-    cmdCard, liveCard, shotsCard, healthCard, policyCard, eventsCard, danger));
+    cmdCard, liveCard, shotsCard, healthCard,
+    d.status === 'active' && can('operator') ? h('div', { class: 'card' }, h('h2', {}, 'Alerts'), silencesBox(d.id)) : null,
+    policyCard, eventsCard, danger));
   await loadCommands();
   every(20000, () => loadCommands().catch(() => {}));
 }
@@ -1431,7 +1665,9 @@ function renderCommandTable(box, items, showDevice, reload) {
       const params = Object.keys(c.params).length ? ' ' + JSON.stringify(c.params) : '';
       const result = [];
       if (c.result && c.result.message) result.push(c.result.message);
-      if (c.has_attachment) {
+      if (c.has_attachment && c.attachment_kind === 'download') {
+        result.push(h('a', { class: 'btn small', href: `/api/v1/admin/commands/${c.id}/attachment`, download: '' }, 'Download logs'));
+      } else if (c.has_attachment) {
         const src = `/api/v1/admin/commands/${c.id}/screenshot`;
         result.push(h('a', { href: src, target: '_blank', rel: 'noopener' }, h('img', { class: 'shot', src, alt: 'Screenshot', loading: 'lazy' })));
       }
@@ -1597,6 +1833,8 @@ async function viewEnroll() {
   const hours = h('select', {},
     [[24, '1 day'], [72, '3 days'], [168, '1 week'], [720, '30 days'], ['', 'Never']].map(([v, t]) => h('option', { value: v, selected: v === 72 }, t)));
   const uses = h('input', { type: 'number', min: 1, placeholder: 'unlimited' });
+  const codeTags = h('input', { type: 'text', placeholder: 'e.g. lobby, floor-2' });
+  const codeNotes = h('input', { type: 'text', placeholder: 'e.g. Installed by Facilities, wall bracket B' });
 
   const form = h('form', {
     onsubmit: async (e) => {
@@ -1608,6 +1846,8 @@ async function viewEnroll() {
           name_prefix: prefix.value,
           expires_hours: hours.value === '' ? null : parseInt(hours.value, 10),
           max_uses: uses.value === '' ? null : parseInt(uses.value, 10),
+          tags: parseTags(codeTags.value),
+          notes: codeNotes.value,
         });
         toast('Enrollment code created.');
         route();
@@ -1616,7 +1856,9 @@ async function viewEnroll() {
   },
   h('div', { class: 'row' }, field('Profile', prof), field('Label', label), field('Device name prefix', prefix, 'Devices are named Prefix-001, Prefix-002… Leave empty to use the tablet model.')),
   h('div', { class: 'row' }, field('Expires after', hours), field('Max devices', uses),
-    h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Create code'))));
+    h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Create code'))),
+  h('div', { class: 'row' }, field('Tags for new devices', codeTags, 'Added to every device that enrolls with this code, ready for schedules, release rings and scoped users.'),
+    field('Notes for new devices', codeNotes)));
 
   const howto = h('div', { class: 'card' }, h('h2', {}, 'Enrolling a tablet'),
     h('ol', {},
@@ -1639,7 +1881,9 @@ async function viewEnroll() {
           h('dt', {}, 'Profile'), h('dd', {}, t.profile_name),
           h('dt', {}, 'Used'), h('dd', {}, `${t.uses}${t.max_uses ? ' of ' + t.max_uses : ''}`),
           h('dt', {}, 'Expires'), h('dd', {}, t.expires_at ? dateTime(t.expires_at) : 'never'),
-          t.name_prefix ? [h('dt', {}, 'Names'), h('dd', {}, `${t.name_prefix}-NNN`)] : null),
+          t.name_prefix ? [h('dt', {}, 'Names'), h('dd', {}, `${t.name_prefix}-NNN`)] : null,
+          t.tags && t.tags.length ? [h('dt', {}, 'Tags'), h('dd', {}, tagChips(t.tags))] : null,
+          t.notes ? [h('dt', {}, 'Notes'), h('dd', {}, t.notes)] : null),
         h('div', { class: 'actions' },
           h('button', {
             class: 'small',
@@ -2043,17 +2287,37 @@ async function viewTokens() {
 /* -------------------------------------------------------------------- audit */
 
 async function viewAudit() {
-  page('Audit log');
+  const q = h('input', { type: 'search', placeholder: 'Search actions, people, targets, details, IPs…' });
+  const actor = h('input', { type: 'text', placeholder: 'Who' });
+  const action = h('input', { type: 'text', placeholder: 'Action, e.g. device. or profile.updated', list: 'audit-actions' });
+  const from = h('input', { type: 'date' });
+  const to = h('input', { type: 'date' });
+  const exportLink = h('a', { class: 'btn', href: '/api/v1/admin/audit/export', download: '' }, 'Export CSV');
+  page('Audit log', exportLink);
+  const actions = h('datalist', { id: 'audit-actions' }, ['admin.', 'device.', 'profile.', 'command.', 'schedule.', 'release.', 'server.', 'user.', 'token.', 'alerts.']
+    .map((v) => h('option', { value: v })));
   const box = h('div', { class: 'card' });
-  mainEl.append(box);
+  mainEl.append(h('div', { class: 'row filters' }, h('div', { class: 'field' }, q), h('div', { class: 'field' }, actor),
+    h('div', { class: 'field' }, action, actions), h('div', { class: 'field' }, from), h('div', { class: 'field' }, to)), box);
   let before = 0;
   const tbody = h('tbody', {});
   const more = h('button', {}, 'Load more');
   box.append(h('div', { class: 'table-wrap' }, h('table', {},
     h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Action'), h('th', {}, 'Target'), h('th', { class: 'hide-sm' }, 'Details'), h('th', { class: 'hide-sm' }, 'IP'))),
     tbody)), h('div', { class: 'actions' }, more));
-  const load = async () => {
-    const r = await api.get('/admin/audit?limit=100' + (before ? `&before=${before}` : ''));
+  const filters = () => {
+    const p = new URLSearchParams();
+    for (const [k, el] of [['q', q], ['actor', actor], ['action', action], ['from', from], ['to', to]]) if (el.value.trim()) p.set(k, el.value.trim());
+    return p;
+  };
+  const load = async (reset) => {
+    const p = filters();
+    exportLink.href = '/api/v1/admin/audit/export?' + p;
+    if (reset) { before = 0; clear(tbody); }
+    p.set('limit', '100');
+    if (before) p.set('before', before);
+    const r = await api.get('/admin/audit?' + p);
+    if (reset && !r.items.length) tbody.append(h('tr', {}, h('td', { colspan: 6, class: 'empty' }, 'Nothing matches.')));
     for (const a of r.items) {
       tbody.append(h('tr', {},
         h('td', { title: dateTime(a.created_at) }, ago(a.created_at)),
@@ -2067,8 +2331,12 @@ async function viewAudit() {
     }
     more.hidden = r.items.length < 100;
   };
-  more.addEventListener('click', () => load().catch(fail));
-  await load();
+  let debounce = null;
+  for (const el of [q, actor, action, from, to]) {
+    el.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => load(true).catch(fail), 300); });
+  }
+  more.addEventListener('click', () => load(false).catch(fail));
+  await load(true);
 }
 
 /* ------------------------------------------------------------------ account */
@@ -2076,27 +2344,178 @@ async function viewAudit() {
 async function viewAccount() {
   page('Your account');
   if (state.me.sso) {
-    mainEl.append(h('div', { class: 'card' }, h('h2', {}, 'Single sign-on'),
+    mainEl.append(h('div', { class: 'stack' }, h('div', { class: 'card' }, h('h2', {}, 'Single sign-on'),
       h('p', {}, `Signed in as ${state.me.username} (${state.me.role}) with ${state.me.sso.label}. `,
-        'Your password, two-factor sign-in and, if roles come from there, your role are managed by your organisation\'s identity provider.')));
+        'Your password, two-factor sign-in and, if roles come from there, your role are managed by your organisation\'s identity provider.')),
+    sessionsCard(), pushCard()));
     return;
   }
   const cur = h('input', { type: 'password', autocomplete: 'current-password', required: true });
   const nw = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: 10 });
-  mainEl.append(h('div', { class: 'stack' }, h('div', { class: 'card' }, h('h2', {}, 'Change password'),
-    h('p', { class: 'sub' }, `Signed in as ${state.me.username} (${state.me.role}).`),
+  const must = state.me.must_setup_2fa ? h('div', { class: 'card banner' }, h('div', {},
+    h('strong', {}, 'Your organisation requires two-factor sign-in. '),
+    'Set up an authenticator app or add a passkey below; the rest of the console opens once you have.')) : null;
+  mainEl.append(h('div', { class: 'stack' }, must, h('div', { class: 'card' }, h('h2', {}, 'Change password'),
+    h('p', { class: 'sub' }, `Signed in as ${state.me.username} (${state.me.role}). Changing it signs you out in every other browser.`),
     h('form', {
       onsubmit: async (e) => {
         e.preventDefault();
         try {
-          await api.post('/admin/session/password', { current_password: cur.value, new_password: nw.value });
-          toast('Password changed.');
+          const r = await api.post('/admin/session/password', { current_password: cur.value, new_password: nw.value });
+          toast(r.other_sessions_ended ? `Password changed. Signed out ${r.other_sessions_ended} other session${r.other_sessions_ended === 1 ? '' : 's'}.` : 'Password changed.');
           cur.value = ''; nw.value = '';
         } catch (ex) { fail(ex); }
       },
     }, h('div', { class: 'row' }, field('Current password', cur), field('New password', nw, 'At least 10 characters.'),
       h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Change'))))),
-  twoFactorCard()));
+  twoFactorCard(), passkeysCard(), state.me.must_setup_2fa ? null : [accountEmailCard(), sessionsCard(), pushCard()]));
+}
+
+// After a second factor is added, leave the "required" mode without a reload
+async function refreshMe() {
+  try {
+    const r = await api.get('/admin/session');
+    const was = state.me.must_setup_2fa;
+    state.me = r.user;
+    state.server = r.server;
+    if (was && !state.me.must_setup_2fa) { toast('Two-factor sign-in is set up. The whole console is open again.'); renderShell(); route(); }
+  } catch (e) { /* keep going */ }
+}
+
+function accountEmailCard() {
+  const email = h('input', { type: 'email', value: state.me.email || '', placeholder: 'you@example.com' });
+  const alerts = h('input', { type: 'checkbox', checked: !!state.me.login_alerts });
+  return h('div', { class: 'card' }, h('h2', {}, 'Email and sign-in alerts'),
+    h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          const r = await api.patch('/admin/session/account', { email: email.value, login_alerts: alerts.checked });
+          state.me = r.user;
+          toast('Saved.');
+        } catch (ex) { fail(ex); }
+      },
+    }, h('div', { class: 'row' }, field('Your email address', email),
+      h('div', { class: 'field' }, h('label', { class: 'check' }, alerts, 'Email me when my account signs in from a new browser'))),
+    h('button', { class: 'primary', type: 'submit' }, 'Save')));
+}
+
+function sessionsCard() {
+  const card = h('div', { class: 'card' }, h('h2', {}, 'Sessions'));
+  const body = h('div', {});
+  card.append(h('p', { class: 'sub' }, 'Browsers signed in to your account.'), body);
+  const load = async () => {
+    const r = await api.get('/admin/session/sessions');
+    clear(body);
+    body.append(h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Browser'), h('th', { class: 'hide-sm' }, 'Address'), h('th', { class: 'hide-sm' }, 'Signed in'), h('th', {}, 'Last active'), h('th', {}))),
+      h('tbody', {}, r.items.map((x) => h('tr', {},
+        h('td', {}, browserName(x.user_agent), x.current ? [' ', h('span', { class: 'chip ok' }, 'This browser')] : null,
+          h('div', { class: 'sub' }, x.method)),
+        h('td', { class: 'hide-sm mono' }, x.ip || '—'),
+        h('td', { class: 'hide-sm' }, when(x.created_at)),
+        h('td', {}, when(x.last_seen_at)),
+        h('td', {}, x.current ? null : h('button', {
+          class: 'small', onclick: async () => { try { await api.del(`/admin/session/sessions/${x.id}`); load().catch(fail); } catch (ex) { fail(ex); } },
+        }, 'Sign out'))))))),
+    r.items.length > 1 ? h('div', { class: 'actions' }, h('button', {
+      class: 'danger small',
+      onclick: async () => {
+        try { const x = await api.post('/admin/session/sessions/end-others'); toast(`Signed out ${x.ended} other session${x.ended === 1 ? '' : 's'}.`); load().catch(fail); } catch (ex) { fail(ex); }
+      },
+    }, 'Sign out everywhere else')) : null);
+  };
+  load().catch(() => body.append(h('div', { class: 'empty' }, 'Session list is available after the latest database update.')));
+  return card;
+}
+
+function browserName(ua) {
+  if (!ua) return 'Unknown browser';
+  const b = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  const os = /Windows/.test(ua) ? 'Windows' : /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS X/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : '';
+  return os ? `${b} on ${os}` : b;
+}
+
+function passkeysCard() {
+  const card = h('div', { class: 'card' }, h('h2', {}, 'Passkeys'));
+  const body = h('div', {});
+  card.append(h('p', { class: 'sub' }, 'Sign in with your fingerprint, face or device PIN instead of a password, or use a passkey as your second step after it. '
+    + 'Passkeys can live on this device, your phone or a security key.'), body);
+  if (!window.PublicKeyCredential) { body.append(h('p', { class: 'error-text' }, 'This browser doesn\'t support passkeys.')); return card; }
+  const load = async () => {
+    const r = await api.get('/admin/session/passkeys');
+    clear(body);
+    if (r.items.length) {
+      body.append(h('div', { class: 'table-wrap' }, h('table', {}, h('tbody', {}, r.items.map((k) => h('tr', {},
+        h('td', {}, k.name), h('td', { class: 'hide-sm' }, 'added ', when(k.created_at)), h('td', {}, k.last_used_at ? ['used ', when(k.last_used_at)] : 'not used yet'),
+        h('td', {}, h('button', {
+          class: 'small danger',
+          onclick: async () => {
+            if (!window.confirm(`Remove the passkey "${k.name}"?`)) return;
+            try { await api.del(`/admin/session/passkeys/${k.id}`); load().catch(fail); refreshMe(); } catch (ex) { fail(ex); }
+          },
+        }, 'Remove'))))))));
+    }
+    const name = h('input', { type: 'text', value: browserName(navigator.userAgent), maxlength: 100 });
+    body.append(h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try { await passkeyRegister(name.value); toast('Passkey added.'); load().catch(fail); refreshMe(); } catch (ex) { fail(ex); }
+      },
+    }, h('div', { class: 'row' }, field('Name for the new passkey', name),
+      h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Add a passkey')))),
+    h('p', { class: 'sub' }, `Passkeys are tied to ${r.rp_id}: open the console at that address to use them.`));
+  };
+  load().catch(() => body.append(h('div', { class: 'empty' }, 'Passkeys are available after the latest database update.')));
+  return card;
+}
+
+function pushCard() {
+  const card = h('div', { class: 'card' }, h('h2', {}, 'Notifications on this device'));
+  const body = h('div', {});
+  card.append(body);
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    body.append(h('p', { class: 'sub' }, 'This browser can\'t receive push notifications. On iPhone and iPad, add the console to the Home Screen first.'));
+    return card;
+  }
+  const render = async () => {
+    clear(body);
+    const info = await api.get('/admin/push');
+    const reg = await navigator.serviceWorker.register('sw.js');
+    const sub = await reg.pushManager.getSubscription();
+    body.append(h('p', { class: 'sub' }, info.receives_alerts
+      ? 'Get offline and problem alerts as notifications in this browser, even when the console is closed.'
+      : 'Alerts cover the whole fleet, so users limited to some devices don\'t receive them.'));
+    if (!info.receives_alerts) return;
+    const actions = h('div', { class: 'actions' });
+    if (sub) {
+      actions.append(h('button', { onclick: async () => { try { const r = await api.post('/admin/push/test'); toast(`Sent to ${r.sent} browser${r.sent === 1 ? '' : 's'}.`); } catch (ex) { fail(ex); } } }, 'Send a test'),
+        h('button', {
+          class: 'danger',
+          onclick: async () => {
+            try { await api.req('DELETE', '/admin/push', { endpoint: sub.endpoint }); await sub.unsubscribe(); toast('Notifications off for this browser.'); render(); } catch (ex) { fail(ex); }
+          },
+        }, 'Turn off'));
+      body.append(h('p', {}, h('span', { class: 'chip ok' }, 'On'), ' for this browser.'), actions);
+    } else {
+      actions.append(h('button', {
+        class: 'primary',
+        onclick: async () => {
+          try {
+            if (await Notification.requestPermission() !== 'granted') { toast('Notifications are blocked for this site in the browser settings.', true); return; }
+            const s2 = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u.toBuf(info.public_key) });
+            const j = s2.toJSON();
+            await api.post('/admin/push', { endpoint: j.endpoint, keys: j.keys });
+            toast('Notifications on.');
+            render();
+          } catch (ex) { fail(ex); }
+        },
+      }, 'Turn on notifications'));
+      body.append(actions);
+    }
+  };
+  render().catch((ex) => body.append(h('div', { class: 'empty' }, ex.message)));
+  return card;
 }
 
 function recoveryCodesBox(codes) {
@@ -2158,6 +2577,7 @@ function twoFactorCard() {
               state.me.two_factor = true;
               state.me.recovery_codes_left = r.recovery_codes.length;
               toast('Two-factor sign-in is on.');
+              refreshMe();
               showOn();
               body.append(recoveryCodesBox(r.recovery_codes));
             } catch (ex) { fail(ex); }

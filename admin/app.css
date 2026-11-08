@@ -355,3 +355,16 @@ button:disabled { opacity: .5; cursor: default; }
 
 .commits { margin: 0 0 .75rem; padding-left: 1.1rem; max-height: 16rem; overflow: auto; }
 .commits li { margin: .15rem 0; }
+
+/* Alert silences */
+.silences { display: flex; flex-direction: column; gap: .4rem; margin-top: .5rem; }
+.silence { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.silence-form { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.silence-form input[type=text] { flex: 1 1 10rem; min-width: 0; }
+
+/* Settings: checkbox lists and event webhooks */
+.choices { display: flex; flex-wrap: wrap; gap: .3rem 1rem; }
+.event-hook { border: 1px solid var(--line); border-radius: 7px; padding: .5rem; display: flex; flex-direction: column; gap: .35rem; }
+
+/* Audit filters */
+.filters .field { flex: 1 1 10rem; }

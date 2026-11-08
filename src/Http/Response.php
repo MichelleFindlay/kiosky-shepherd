@@ -24,6 +24,12 @@ final class Response
         return new self($status, ['Content-Type' => 'application/json; charset=utf-8'] + $headers, $body);
     }
 
+    /** Any text body (CSV, Prometheus metrics…). */
+    public static function raw(string $body, string $contentType, array $headers = []): self
+    {
+        return new self(200, ['Content-Type' => $contentType] + $headers, $body);
+    }
+
     public static function noContent(): self
     {
         return new self(204, [], null);

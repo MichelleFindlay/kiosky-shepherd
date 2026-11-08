@@ -38,6 +38,8 @@ final class EnrollmentApi
             'profile_id' => (int) $t['profile_id'],
             'profile_name' => $t['profile_name'],
             'name_prefix' => $t['name_prefix'],
+            'tags' => array_values((array) Db::decode($t['tags'] ?? null)),
+            'notes' => $t['notes'] ?? null,
             'max_uses' => $t['max_uses'] === null ? null : (int) $t['max_uses'],
             'uses' => (int) $t['uses'],
             'expires_at' => Util::iso($t['expires_at']),
@@ -62,7 +64,7 @@ final class EnrollmentApi
         return Response::json($items);
     }
 
-    /** POST /api/v1/admin/enrollment-tokens  {profile_id, label?, name_prefix?, expires_hours?, max_uses?} */
+    /** POST /api/v1/admin/enrollment-tokens  {profile_id, label?, name_prefix?, tags?, notes?, expires_hours?, max_uses?} */
     public static function create(Request $req): Response
     {
         $p = AdminAuth::require($req, 'operator');
@@ -90,8 +92,16 @@ final class EnrollmentApi
         if ($maxUses !== null && (!is_int($maxUses) || $maxUses < 1 || $maxUses > 100000)) {
             $errors['max_uses'] = 'Use 1 to 100000, or null for unlimited.';
         }
+        $tags = array_key_exists('tags', $b) && $b['tags'] !== null && $b['tags'] !== [] ? \Shepherd\Devices::validateTags($b['tags']) : [];
+        $notes = is_string($b['notes'] ?? null) ? trim($b['notes']) : '';
+        if (mb_strlen($notes) > 5000) {
+            $errors['notes'] = 'Use at most 5000 characters.';
+        }
         if ($errors !== []) {
             throw HttpError::validation($errors);
+        }
+        if (($tags !== [] || $notes !== '') && !\Shepherd\Migrator::hasColumn('enrollment_tokens', 'tags')) {
+            throw HttpError::conflict('Tags and notes on enrollment codes need the latest database update.');
         }
 
         // 12 characters from a 32-letter alphabet: 60 bits, plus rate limiting on enroll
@@ -103,7 +113,7 @@ final class EnrollmentApi
             'max_uses' => $maxUses,
             'expires_at' => $hours === null ? null : gmdate('Y-m-d H:i:s', time() + $hours * 3600),
             'created_by' => $p->adminId,
-        ]);
+        ] + ($tags !== [] ? ['tags' => Db::json($tags)] : []) + ($notes !== '' ? ['notes' => $notes] : []));
         Audit::log($p, 'enrollment.created', 'enrollment_token', $id,
             ['label' => $label, 'profile_id' => $profileId, 'max_uses' => $maxUses, 'expires_hours' => $hours]);
         return Response::json(self::present(Db::one(self::SELECT . ' WHERE t.id = :id', ['id' => $id])), 201);

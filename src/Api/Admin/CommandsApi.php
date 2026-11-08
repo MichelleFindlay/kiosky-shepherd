@@ -108,6 +108,26 @@ final class CommandsApi
         return Response::json(Commands::present(Db::one(self::select() . ' WHERE c.id = :id', ['id' => $id])));
     }
 
+    /** GET /api/v1/admin/commands/{id}/attachment  a diagnostics bundle (download) or screenshot */
+    public static function attachment(Request $req): Response
+    {
+        $p = AdminAuth::require($req);
+        $row = Db::one('SELECT c.id, c.type, c.device_id, c.attachment, d.name FROM commands c JOIN devices d ON d.id = c.device_id
+                         WHERE c.id = :id', ['id' => $req->intParam('id')]);
+        if ($row === null || $row['attachment'] === null || !Scope::canSee($p, (int) $row['device_id'])) {
+            throw HttpError::notFound('Attachment');
+        }
+        if ($row['type'] !== 'diagnostics') {
+            return self::screenshot($req);
+        }
+        $name = basename((string) $row['attachment']);
+        $ext = pathinfo($name, PATHINFO_EXTENSION);
+        $slug = trim((string) preg_replace('/[^A-Za-z0-9]+/', '-', (string) $row['name']), '-') ?: 'device';
+        return Response::file(Config::storage('diagnostics') . '/' . $name,
+            ['gz' => 'application/gzip', 'zip' => 'application/zip'][$ext] ?? 'text/plain; charset=utf-8',
+            "diagnostics-$slug-{$row['id']}.$ext");
+    }
+
     /** GET /api/v1/admin/commands/{id}/screenshot */
     public static function screenshot(Request $req): Response
     {

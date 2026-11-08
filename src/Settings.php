@@ -50,16 +50,43 @@ final class Settings
             'label' => 'Keep events and finished commands for (days)', 'help' => 'The audit log is kept for at least a year.'],
 
         // --- Offline alerts ------------------------------------------------------
-        'alerts.offline_minutes' => ['type' => 'int', 'min' => 5, 'max' => 1440, 'group' => 'Offline alerts',
+        'alerts.offline_minutes' => ['type' => 'int', 'min' => 5, 'max' => 1440, 'group' => 'Alerts',
             'label' => 'Report a device offline after (minutes)', 'help' => ''],
-        'alerts.email' => ['type' => 'emails', 'group' => 'Offline alerts', 'label' => 'Email addresses',
+        'alerts.email' => ['type' => 'emails', 'group' => 'Alerts', 'label' => 'Email addresses',
             'help' => 'One per line. Sent through the SMTP server in config.php, or PHP mail() when there is none (see Email below).'],
-        'alerts.email_from' => ['type' => 'email', 'group' => 'Offline alerts', 'label' => 'Send email from',
+        'alerts.email_from' => ['type' => 'email', 'group' => 'Alerts', 'label' => 'Send email from',
             'help' => 'An address on your domain, so messages don\'t land in spam. Empty: kiosky-shepherd@<server>.'],
-        'alerts.webhooks' => ['type' => 'webhooks', 'group' => 'Offline alerts', 'label' => 'Webhooks',
+        'alerts.webhooks' => ['type' => 'webhooks', 'group' => 'Alerts', 'label' => 'Webhooks',
             'help' => 'Webhooks that need extra headers (e.g. a token) can only be set in config.php.'],
-        'alerts.ignore_tags' => ['type' => 'tags', 'group' => 'Offline alerts', 'label' => 'Never report devices tagged',
+        'alerts.ignore_tags' => ['type' => 'tags', 'group' => 'Alerts', 'label' => 'Never report devices tagged',
             'help' => 'Separated by commas.'],
+
+        'alerts.problems' => ['type' => 'choices', 'group' => 'Alerts', 'label' => 'Also alert about',
+            'choices' => ['page_error' => 'Page errors', 'lockdown' => 'Lockdown that can be escaped', 'low_battery' => 'Low battery',
+                'permission' => 'Missing "Display over other apps" permission', 'policy' => 'Policy not applied', 'low_uptime' => 'Low uptime (under 90% over 7 days)'],
+            'help' => 'Each is reported once when it has lasted two cron runs, and again when it clears.'],
+        'alerts.low_battery' => ['type' => 'int', 'min' => 0, 'max' => 99, 'group' => 'Alerts',
+            'label' => 'Low battery below (%)', 'help' => 'Only while not charging. 0 turns the battery check off.'],
+        'alerts.quiet_start' => ['type' => 'time', 'group' => 'Alerts', 'label' => 'Quiet hours start',
+            'help' => 'No alerts are sent between the two times (server time zone); whatever is still wrong afterwards is reported then. Leave both empty for none.'],
+        'alerts.quiet_end' => ['type' => 'time', 'group' => 'Alerts', 'label' => 'Quiet hours end', 'help' => ''],
+
+        // --- Security ------------------------------------------------------------
+        'require_2fa' => ['type' => 'bool', 'group' => 'Security', 'label' => 'Require two-factor sign-in',
+            'help' => 'Password users without an authenticator app or passkey must set one up before they can do anything else. Single sign-on users rely on their identity provider.'],
+
+        // --- Reports and backups --------------------------------------------------
+        'report.weekly' => ['type' => 'bool', 'group' => 'Reports and backups', 'label' => 'Email a weekly fleet report',
+            'help' => 'Monday from 08:00 (server time zone): offline devices, least reliable tablets, versions, failed commands and changes.'],
+        'report.recipients' => ['type' => 'emails', 'group' => 'Reports and backups', 'label' => 'Report recipients',
+            'help' => 'One per line. Empty: the alert email addresses.'],
+        'backup.nightly' => ['type' => 'bool', 'group' => 'Reports and backups', 'label' => 'Back up the database every night',
+            'help' => 'After 03:00 (server time zone), into storage/backups. Download them under Server → Database backups.'],
+        'backup.keep' => ['type' => 'int', 'min' => 1, 'max' => 60, 'group' => 'Reports and backups', 'label' => 'Database backups to keep', 'help' => ''],
+
+        // --- Integrations ---------------------------------------------------------
+        'events.webhooks' => ['type' => 'event_webhooks', 'group' => 'Integrations', 'label' => 'Event webhooks',
+            'help' => 'POSTs JSON for each chosen event (device enrolled, offline, command failed…). With a secret, requests carry X-Shepherd-Signature: sha256=<HMAC of the body>.'],
 
         // --- Updates -------------------------------------------------------------
         'self_update.auto' => ['type' => 'bool', 'group' => 'Kiosky Shepherd updates', 'label' => 'Install new releases automatically',
@@ -101,7 +128,12 @@ final class Settings
             'alerts.email', 'alerts.webhooks' => [],
             'alerts.email_from' => '',
             'alerts.ignore_tags' => ['no-alerts'],
-            'self_update.auto' => false,
+            'self_update.auto', 'require_2fa', 'report.weekly', 'backup.nightly' => false,
+            'alerts.problems' => ['page_error', 'lockdown', 'low_battery'],
+            'alerts.low_battery' => 20,
+            'alerts.quiet_start', 'alerts.quiet_end' => '',
+            'report.recipients', 'events.webhooks' => [],
+            'backup.keep' => 7,
             'self_update.channel' => 'stable',
             default => null,
         };
@@ -135,6 +167,12 @@ final class Settings
     /** Webhooks from config.php may carry header secrets: the console only ever sees type and URL. */
     private static function forDisplay(string $key, mixed $value): mixed
     {
+        if ($key === 'events.webhooks' && is_array($value)) {
+            return array_values(array_map(static fn ($w) => [
+                'url' => (string) ($w['url'] ?? ''), 'events' => array_values((array) ($w['events'] ?? [])),
+                'has_secret' => !empty($w['secret']),
+            ], array_filter($value, 'is_array')));
+        }
         if ($key === 'alerts.webhooks' && is_array($value)) {
             return array_values(array_map(static fn ($w) => [
                 'type' => is_array($w) ? (string) ($w['type'] ?? 'json') : 'json',
@@ -224,6 +262,20 @@ final class Settings
                     $err = "Enter up to {$def['max']} characters.";
                 }
                 return $v;
+            case 'choices':
+                if (!is_array($v) || !array_is_list($v) || array_diff($v, array_keys($def['choices'])) !== []) {
+                    $err = 'Choose from the list.';
+                    return [];
+                }
+                return array_values(array_unique($v));
+            case 'time':
+                $v = is_string($v) ? trim($v) : '';
+                if ($v !== '' && !preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $v)) {
+                    $err = 'Use a 24-hour time such as 22:00, or leave it empty.';
+                }
+                return $v;
+            case 'event_webhooks':
+                return self::normaliseEventWebhooks($v, $err);
             case 'enum':
                 if (!is_string($v) || !in_array($v, $def['values'], true)) {
                     $err = 'Use ' . implode(' or ', $def['values']) . '.';
@@ -265,6 +317,35 @@ final class Settings
         }
         $err = 'Unsupported setting.';
         return null;
+    }
+
+    /** Event webhooks: url, events, and a secret that's kept unless a new one is typed. */
+    private static function normaliseEventWebhooks(mixed $v, ?string &$err): array
+    {
+        if (!is_array($v) || !array_is_list($v) || count($v) > 10) {
+            $err = 'Use a list of up to 10 webhooks.';
+            return [];
+        }
+        $old = array_column(array_filter((array) Config::get('events.webhooks', []), 'is_array'), null, 'url');
+        $out = [];
+        foreach ($v as $w) {
+            $url = is_array($w) && is_string($w['url'] ?? null) ? trim($w['url']) : '';
+            if (!preg_match('#^https?://\S+$#i', $url) || filter_var($url, FILTER_VALIDATE_URL) === false || strlen($url) > 1000) {
+                $err = "Not a valid webhook address: $url";
+                return [];
+            }
+            $events = array_values(array_intersect((array) ($w['events'] ?? []), array_keys(Events::TYPES)));
+            $secret = is_string($w['secret'] ?? null) ? trim($w['secret']) : '';
+            if ($secret === '' && empty($w['clear_secret'])) {
+                $secret = (string) ($old[$url]['secret'] ?? '');
+            }
+            if (strlen($secret) > 200) {
+                $err = 'Secrets are at most 200 characters.';
+                return [];
+            }
+            $out[] = ['url' => $url, 'events' => $events, 'secret' => $secret];
+        }
+        return $out;
     }
 
     /**

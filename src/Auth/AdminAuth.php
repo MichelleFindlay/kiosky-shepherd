@@ -77,14 +77,144 @@ final class AdminAuth
             $_SESSION = [];
             return null;
         }
+        if (!self::touchSession($req, $admin)) {
+            $_SESSION = [];
+            return null; // signed out from another browser, or "sign out everywhere"
+        }
         if (!$req->isSafeMethod()) {
             $sent = (string) $req->header('x-csrf-token');
             if ($sent === '' || !hash_equals((string) ($_SESSION['csrf'] ?? ''), $sent)) {
                 throw new HttpError(403, 'csrf_failed', 'The page is out of date. Reload it and try again.');
             }
         }
+        if (self::mustSetUpSecondFactor($admin) && !self::allowedBeforeSecondFactor($req)) {
+            throw new HttpError(403, 'two_factor_required',
+                'Your organisation requires two-factor sign-in. Set it up under Your account to continue.');
+        }
         return new Principal('admin', (int) $admin['id'], (string) $admin['username'], (string) $admin['role'],
             $req->ip(), (int) $admin['id'], self::scopeOf($admin));
+    }
+
+    // ---- Second factor policy -------------------------------------------------------
+
+    /** TOTP or at least one passkey. */
+    public static function hasSecondFactor(array $admin): bool
+    {
+        return self::hasTotp($admin) || Passkeys::count((int) $admin['id']) > 0;
+    }
+
+    /**
+     * True when 'require_2fa' is on and this password user has no second factor yet.
+     * Single sign-on users are left to their identity provider's MFA.
+     */
+    public static function mustSetUpSecondFactor(array $admin): bool
+    {
+        return (bool) Config::get('require_2fa', false) && ($admin['password_hash'] ?? null) !== null
+            && ($admin['sso_provider'] ?? null) === null && !self::hasSecondFactor($admin);
+    }
+
+    /** What such a user may still do: see who they are, set up a factor, sign out. */
+    private static function allowedBeforeSecondFactor(Request $req): bool
+    {
+        $p = $req->path;
+        return $p === '/api/v1/admin/session' || str_starts_with($p, '/api/v1/admin/session/2fa/')
+            || str_starts_with($p, '/api/v1/admin/session/passkeys');
+    }
+
+    // ---- Tracked sessions (admin_sessions) ------------------------------------------
+
+    private const BROWSER_COOKIE = 'shepherd_browser';
+
+    private static function sessionsTracked(): bool
+    {
+        return \Shepherd\Migrator::has('admin_sessions');
+    }
+
+    /** A long-lived random cookie per browser, for "new sign-in" emails. Returns its hash. */
+    private static function browserHash(Request $req): string
+    {
+        $v = $_COOKIE[self::BROWSER_COOKIE] ?? null;
+        if (!is_string($v) || !preg_match('/^[A-Za-z0-9_\-]{32,64}$/', $v)) {
+            $v = \Shepherd\Util::token(32);
+            setcookie(self::BROWSER_COOKIE, $v, [
+                'expires' => time() + 400 * 86400, 'path' => '/',
+                'secure' => (bool) Config::get('cookie_secure', true) || $req->isHttps(),
+                'httponly' => true, 'samesite' => 'Strict',
+            ]);
+        }
+        return hash('sha256', $v);
+    }
+
+    /** Records a new sign-in; emails the user when it's from a browser they haven't used. */
+    private static function startTracked(Request $req, array $admin, string $method): void
+    {
+        if (!self::sessionsTracked()) {
+            return;
+        }
+        $token = \Shepherd\Util::token(32);
+        $browser = self::browserHash($req);
+        $seenBefore = Db::value('SELECT COUNT(*) FROM admin_sessions WHERE admin_id = :a AND browser_hash = :b',
+            ['a' => (int) $admin['id'], 'b' => $browser]) > 0;
+        Db::insert('admin_sessions', [
+            'id' => hash('sha256', $token),
+            'admin_id' => (int) $admin['id'],
+            'browser_hash' => $browser,
+            'ip' => $req->ip(),
+            'user_agent' => \Shepherd\Util::clip($req->header('user-agent'), 255),
+            'method' => $method,
+        ]);
+        $_SESSION['sid'] = $token;
+        $firstEver = Db::value('SELECT COUNT(*) FROM admin_sessions WHERE admin_id = :a', ['a' => (int) $admin['id']]) <= 1;
+        if (!$seenBefore && !$firstEver && !empty($admin['login_alerts']) && filter_var($admin['email'] ?? '', FILTER_VALIDATE_EMAIL)) {
+            $to = (string) $admin['email'];
+            $ip = $req->ip();
+            $ua = (string) $req->header('user-agent');
+            \Shepherd\Util::afterResponse(static fn () => \Shepherd\Mailer::send([$to], 'New sign-in to your account',
+                "Someone signed in to Kiosky Shepherd as {$admin['username']} from a browser not used before.\n\n"
+                . "When: " . gmdate('Y-m-d H:i') . " UTC\nAddress: $ip\nBrowser: $ua\nMethod: $method\n\n"
+                . "If this wasn't you, sign in, open Your account → Sessions, sign out the other sessions and change your password.\n"
+                . \Shepherd\Util::baseUrl() . '/admin/#/account'));
+        }
+    }
+
+    /** Checks this request's tracked session still exists. False when it was ended elsewhere. */
+    private static function touchSession(Request $req, array $admin): bool
+    {
+        if (!self::sessionsTracked()) {
+            return true;
+        }
+        $token = $_SESSION['sid'] ?? null;
+        if (!is_string($token)) {
+            // Signed in before sessions were tracked: start tracking now
+            self::startTracked($req, $admin, isset($_SESSION['sso_provider']) ? 'sso' : 'password');
+            return true;
+        }
+        $row = Db::one('SELECT last_seen_at, ended_at, admin_id FROM admin_sessions WHERE id = :id', ['id' => hash('sha256', $token)]);
+        if ($row === null || $row['ended_at'] !== null || (int) $row['admin_id'] !== (int) $admin['id']) {
+            return false;
+        }
+        if (strtotime($row['last_seen_at'] . ' UTC') < time() - 60) {
+            Db::run('UPDATE admin_sessions SET last_seen_at = NOW(), ip = :ip WHERE id = :id',
+                ['ip' => $req->ip(), 'id' => hash('sha256', $token)]);
+        }
+        return true;
+    }
+
+    /** The current session's id (hash), or null. */
+    public static function currentSessionId(): ?string
+    {
+        $t = $_SESSION['sid'] ?? null;
+        return is_string($t) ? hash('sha256', $t) : null;
+    }
+
+    /** Ends sessions of a user: all of them, or all but $keep. Returns how many. */
+    public static function endSessions(int $adminId, ?string $keep = null): int
+    {
+        if (!self::sessionsTracked()) {
+            return 0;
+        }
+        return Db::run('UPDATE admin_sessions SET ended_at = NOW() WHERE admin_id = :a AND ended_at IS NULL'
+            . ($keep !== null ? ' AND id <> :k' : ''), ['a' => $adminId] + ($keep !== null ? ['k' => $keep] : []))->rowCount();
     }
 
     /**
@@ -201,7 +331,7 @@ final class AdminAuth
      *
      * @return array{0: Principal, 1: string} principal and CSRF token
      */
-    public static function establish(Request $req, array $admin, ?string $ssoProvider = null): array
+    public static function establish(Request $req, array $admin, ?string $ssoProvider = null, ?string $method = null): array
     {
         Db::run('UPDATE admins SET last_login_at = NOW() WHERE id = :id', ['id' => (int) $admin['id']]);
 
@@ -213,6 +343,7 @@ final class AdminAuth
         if ($ssoProvider !== null) {
             $_SESSION['sso_provider'] = $ssoProvider;
         }
+        self::startTracked($req, $admin, $method ?? ($ssoProvider !== null ? 'sso:' . $ssoProvider : 'password'));
 
         $p = new Principal('admin', (int) $admin['id'], (string) $admin['username'], (string) $admin['role'],
             $req->ip(), (int) $admin['id'], self::scopeOf($admin));
@@ -237,6 +368,10 @@ final class AdminAuth
     public static function logout(Request $req): void
     {
         self::startSession($req);
+        $sid = self::currentSessionId();
+        if ($sid !== null && self::sessionsTracked()) {
+            Db::run('UPDATE admin_sessions SET ended_at = NOW() WHERE id = :id AND ended_at IS NULL', ['id' => $sid]);
+        }
         $_SESSION = [];
         if (ini_get('session.use_cookies')) {
             $p = session_get_cookie_params();

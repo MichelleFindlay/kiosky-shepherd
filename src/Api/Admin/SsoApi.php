@@ -26,6 +26,8 @@ final class SsoApi
     {
         return Response::json([
             'password' => (bool) Config::get('password_login', true),
+            'passkeys' => (bool) Config::get('password_login', true) && \Shepherd\Migrator::has('webauthn_credentials')
+                && (int) \Shepherd\Db::value('SELECT COUNT(*) FROM webauthn_credentials') > 0,
             'providers' => array_values(array_map(static fn (OidcProvider $p) => [
                 'id' => $p->id,
                 'label' => $p->label,

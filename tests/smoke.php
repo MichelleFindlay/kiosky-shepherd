@@ -424,6 +424,165 @@ expect($second, 200, 'POST', "$A/session/2fa/disable", ['password' => $adminPass
 $me = expect($second, 200, 'GET', "$A/session");
 check($me['user']['two_factor'] === false, 'two-factor can be turned off');
 
+// ---- Device problems in the overview -----------------------------------------------
+expect($device, 200, 'POST', "$D/checkin", ['status' => ['battery_level' => 5, 'charging' => false, 'screen_on' => true]]);
+$ov = expect($second, 200, 'GET', "$A/overview");
+$why = implode(' | ', array_merge(...array_map(static fn ($a) => $a['reasons'], $ov['attention'])));
+check(str_contains($why, 'battery at 5%'), 'low battery shows on the overview', $ov['attention']);
+
+// ---- Enrollment codes with tags and notes, and the device.enrolled event ---------------
+expect($second, 200, 'PATCH', "$A/system/settings", ['events.webhooks' => [['url' => 'http://127.0.0.1:8099/hook', 'events' => [], 'secret' => 'ci-secret']]]);
+$tok3 = expect($second, 201, 'POST', "$A/enrollment-tokens", ['profile_id' => 1, 'label' => 'tagged', 'tags' => ['Fresh', 'lobby'], 'notes' => 'Bracket B']);
+check($tok3['tags'] === ['fresh', 'lobby'] && $tok3['notes'] === 'Bracket B', 'enrollment codes keep tags and notes', $tok3);
+$d3 = new Client($base);
+expect($d3, 201, 'POST', "$D/enroll", ['token' => $tok3['code'], 'device' => ['android_id' => 'ci-android-3', 'model' => 'CI Third']]);
+$third3 = expect($second, 200, 'GET', "$A/devices?q=" . rawurlencode('CI Third'))['items'][0];
+check($third3['tags'] === ['fresh', 'lobby'], 'a device enrolled with the code gets its tags', $third3['tags']);
+check(expect($second, 200, 'GET', "$A/devices/{$third3['id']}")['notes'] === 'Bracket B', 'and its notes');
+
+// ---- Event webhooks (the workflow runs a receiver on 127.0.0.1:8099) -----------------
+if (getenv('CI') !== false) {
+    $ev = expect($second, 200, 'POST', "$A/events/test");
+    check($ev['delivered'] >= 1, 'a test event is delivered', $ev);
+    $recent = expect($second, 200, 'GET', "$A/events")['recent'];
+    check(in_array('device.enrolled', array_column($recent, 'event'), true), 'device.enrolled was queued', $recent);
+}
+expect($second, 200, 'PATCH', "$A/system/settings", ['events.webhooks' => null]);
+
+// ---- CSV exports and audit search ------------------------------------------------------
+$csv = $second->call('GET', "$A/devices/export");
+check($csv['status'] === 200 && str_contains($csv['headers']['content-type'] ?? '', 'text/csv') && str_contains($csv['raw'], 'CI Third'), 'devices export as CSV', $csv['headers']);
+$aud = expect($second, 200, 'GET', "$A/audit?action=device.&limit=50");
+check($aud['items'] !== [] && array_filter($aud['items'], static fn ($a) => !str_starts_with($a['action'], 'device.')) === [], 'audit log filters by action', array_column($aud['items'], 'action'));
+$acsv = $second->call('GET', "$A/audit/export?actor=ci");
+check($acsv['status'] === 200 && str_contains($acsv['raw'], 'When (UTC)'), 'the audit log exports as CSV');
+
+// ---- Alert silences --------------------------------------------------------------------
+$si = expect($second, 201, 'POST', "$A/alerts/silences", ['device_id' => $third3['id'], 'minutes' => 60, 'note' => 'ci']);
+$sl = expect($second, 200, 'GET', "$A/alerts/silences")['items'];
+check(in_array($si['id'], array_column($sl, 'id'), true), 'a device can be silenced', $sl);
+expect($scoped, 403, 'POST', "$A/alerts/silences", ['all' => true, 'minutes' => 60]);
+expect($second, 204, 'DELETE', "$A/alerts/silences/{$si['id']}");
+
+// ---- Diagnostics bundle ----------------------------------------------------------------
+$dg = expect($second, 201, 'POST', "$A/devices/$id/commands", ['type' => 'diagnostics']);
+$ci = expect($device, 200, 'POST', "$D/checkin", []);
+check(in_array($dg['id'], array_column($ci['commands'], 'id'), true), 'the diagnostics command is delivered');
+expect($device, 200, 'POST', "$D/commands/{$dg['id']}/result", ['status' => 'done', 'bundle' => base64_encode(gzencode("logcat line 1\nline 2\n"))]);
+$att = $second->call('GET', "$A/commands/{$dg['id']}/attachment");
+check($att['status'] === 200 && str_starts_with($att['raw'], "\x1f\x8b"), 'the bundle downloads', $att['headers']);
+
+// ---- Page playlist policy ----------------------------------------------------------------
+$pl = expect($second, 200, 'PATCH', "$A/profiles/1", ['settings' => ['playlist.urls' => "https://a.example/\nb.example"]]);
+check(($pl['settings']['playlist.urls'] ?? null) === ['https://a.example/', 'https://b.example'], 'playlist pages are normalised', $pl['settings']);
+expect($second, 422, 'PATCH', "$A/profiles/1", ['settings' => ['playlist.urls' => ['ftp://nope']]]);
+expect($second, 200, 'PATCH', "$A/profiles/1", ['settings' => ['playlist.urls' => null]]);
+
+// ---- Database backup -------------------------------------------------------------------
+$bk = expect($second, 201, 'POST', "$A/system/backups");
+$dl = $second->call('GET', "$A/system/backups/" . rawurlencode($bk['name']));
+check($dl['status'] === 200 && str_starts_with($dl['raw'], "\x1f\x8b") && str_contains((string) gzdecode($dl['raw']), 'CREATE TABLE `devices`'), 'a database backup downloads as .sql.gz');
+expect($second, 404, 'GET', "$A/system/backups/" . rawurlencode('../config/config.php'));
+expect($second, 204, 'DELETE', "$A/system/backups/" . rawurlencode($bk['name']));
+
+// ---- Weekly report ---------------------------------------------------------------------
+$rp = expect($second, 200, 'GET', "$A/system/report");
+check(str_starts_with($rp['subject'], 'Weekly report') && str_contains($rp['text'], 'active kiosks'), 'the weekly report builds', $rp);
+if (getenv('CI') !== false) {
+    expect($second, 200, 'PATCH', "$A/system/settings", ['report.recipients' => ['ci@example.com']]);
+    expect($second, 200, 'POST', "$A/system/report");
+    expect($second, 200, 'PATCH', "$A/system/settings", ['report.recipients' => null]);
+}
+
+// ---- Prometheus metrics (API token) ------------------------------------------------------
+$m = $api->call('GET', '/metrics');
+check($m['status'] === 200 && str_contains($m['raw'], 'kiosky_devices ') && str_contains($m['raw'], 'kiosky_device_up{'), 'metrics are served to an API token', $m['raw']);
+check($anon->call('GET', '/metrics')['status'] === 401, 'metrics need a token');
+
+// ---- Push subscriptions ------------------------------------------------------------------
+$pi = expect($second, 200, 'GET', "$A/push");
+check(strlen($pi['public_key']) === 87, 'the server has a VAPID key', $pi);
+$keys = ['p256dh' => rtrim(strtr(base64_encode("\x04" . random_bytes(64)), '+/', '-_'), '='), 'auth' => rtrim(strtr(base64_encode(random_bytes(16)), '+/', '-_'), '=')];
+expect($second, 422, 'POST', "$A/push", ['endpoint' => 'https://evil.example/push', 'keys' => $keys]);
+expect($second, 201, 'POST', "$A/push", ['endpoint' => 'https://fcm.googleapis.com/fcm/send/ci-test', 'keys' => $keys]);
+expect($second, 204, 'DELETE', "$A/push", ['endpoint' => 'https://fcm.googleapis.com/fcm/send/ci-test']);
+
+// ---- Sessions ------------------------------------------------------------------------------
+$elsewhere = new Client($base);
+expect($elsewhere, 200, 'POST', "$A/session", ['username' => $adminUser, 'password' => $adminPass]);
+$ss = expect($second, 200, 'GET', "$A/session/sessions")['items'];
+check(count($ss) >= 2 && count(array_filter($ss, static fn ($x) => $x['current'])) === 1, 'sessions are listed, with this one marked', $ss);
+$end = expect($second, 200, 'POST', "$A/session/sessions/end-others");
+check($end['ended'] >= 1, 'other sessions can be ended', $end);
+expect($elsewhere, 401, 'GET', "$A/session");
+expect($second, 200, 'GET', "$A/session");
+
+// ---- Passkeys, with a software authenticator -------------------------------------------
+/** Minimal CBOR encoder for the authenticator's side */
+function cbor(mixed $v): string
+{
+    $head = static function (int $major, int $n): string {
+        if ($n < 24) { return chr(($major << 5) | $n); }
+        if ($n < 256) { return chr(($major << 5) | 24) . chr($n); }
+        return chr(($major << 5) | 25) . pack('n', $n);
+    };
+    if (is_int($v)) { return $v >= 0 ? $head(0, $v) : $head(1, -1 - $v); }
+    if (is_array($v) && isset($v['__bytes'])) { return $head(2, strlen($v['__bytes'])) . $v['__bytes']; }
+    if (is_string($v)) { return $head(3, strlen($v)) . $v; }
+    $out = $head(5, count($v));
+    foreach ($v as $k => $x) { $out .= cbor($k) . cbor($x); }
+    return $out;
+}
+$b64u = static fn (string $s) => rtrim(strtr(base64_encode($s), '+/', '-_'), '=');
+$origin = $base;
+$rpHash = hash('sha256', (string) parse_url($base, PHP_URL_HOST), true);
+$key = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
+$ec = openssl_pkey_get_details($key)['ec'];
+$credId = random_bytes(16);
+$ro = expect($second, 200, 'POST', "$A/session/passkeys/options");
+check($ro['rp']['id'] === parse_url($base, PHP_URL_HOST), 'passkey options name this site', $ro['rp']);
+$cose = cbor([1 => 2, 3 => -7, -1 => 1, -2 => ['__bytes' => str_pad($ec['x'], 32, "\0", STR_PAD_LEFT)], -3 => ['__bytes' => str_pad($ec['y'], 32, "\0", STR_PAD_LEFT)]]);
+$authData = $rpHash . chr(0x45) . pack('N', 0) . str_repeat("\0", 16) . pack('n', strlen($credId)) . $credId . $cose;
+$clientCreate = json_encode(['type' => 'webauthn.create', 'challenge' => $ro['challenge'], 'origin' => $origin]);
+expect($second, 201, 'POST', "$A/session/passkeys", ['name' => 'CI key', 'credential' => [
+    'id' => $b64u($credId), 'clientDataJSON' => $b64u($clientCreate),
+    'attestationObject' => $b64u(cbor(['fmt' => 'none', 'attStmt' => [], 'authData' => ['__bytes' => $authData]])),
+]]);
+$signIn = static function (Client $c, string $mode, int $counter, bool $uv = true) use ($A, $b64u, $rpHash, $key, $credId, $origin): array {
+    $o = $c->call('POST', "$A/session/passkey/options", ['mode' => $mode])['body'];
+    $client = json_encode(['type' => 'webauthn.get', 'challenge' => $o['challenge'], 'origin' => $origin]);
+    $ad = $rpHash . chr($uv ? 0x05 : 0x01) . pack('N', $counter);
+    openssl_sign($ad . hash('sha256', $client, true), $sig, $key, OPENSSL_ALGO_SHA256);
+    return $c->call('POST', "$A/session/passkey", ['mode' => $mode, 'credential' => [
+        'id' => $b64u($credId), 'clientDataJSON' => $b64u($client), 'authenticatorData' => $b64u($ad), 'signature' => $b64u($sig)]]);
+};
+$pk = new Client($base);
+$r = $signIn($pk, 'login', 1);
+check($r['status'] === 200 && $r['body']['user']['username'] === $adminUser, 'a passkey alone signs in', $r['body']);
+$r = $signIn(new Client($base), 'login', 1);
+check($r['status'] === 401, 'a passkey counter that doesn\'t go up is refused', $r['body']);
+$r = $signIn(new Client($base), 'login', 5, false);
+check($r['status'] === 401, 'a passkey alone needs user verification', $r['body']);
+$pw = new Client($base);
+$lr = expect($pw, 200, 'POST', "$A/session", ['username' => $adminUser, 'password' => $adminPass]);
+check(($lr['two_factor_required'] ?? false) && $lr['methods'] === ['passkey'], 'with a passkey, a password needs a second step', $lr);
+$r = $signIn($pw, 'second', 6, false);
+check($r['status'] === 200, 'the passkey completes a password sign-in', $r['body']);
+// ---- Require two-factor sign-in (the admin has a passkey now, so isn't blocked) -----------
+expect($second, 201, 'POST', "$A/users", ['username' => 'ci-req', 'password' => 'ci-password-789', 'role' => 'viewer']);
+expect($second, 200, 'PATCH', "$A/system/settings", ['require_2fa' => true]);
+$req2 = new Client($base);
+$rs = expect($req2, 200, 'POST', "$A/session", ['username' => 'ci-req', 'password' => 'ci-password-789']);
+check($rs['user']['must_setup_2fa'] === true, 'a user without a second factor must set one up', $rs['user']);
+$blocked = $req2->call('GET', "$A/devices");
+check($blocked['status'] === 403 && ($blocked['body']['error']['code'] ?? null) === 'two_factor_required', 'everything else is blocked until then', $blocked['body']);
+expect($req2, 200, 'GET', "$A/session");
+expect($second, 200, 'PATCH', "$A/system/settings", ['require_2fa' => null]);
+expect($req2, 200, 'GET', "$A/devices");
+
+$mine = expect($second, 200, 'GET', "$A/session/passkeys")['items'];
+expect($second, 204, 'DELETE', "$A/session/passkeys/{$mine[0]['id']}");
+
 // ---- Device rate limit and retirement ---------------------------------------------
 $limited = false;
 for ($i = 0; $i < 130 && !$limited; $i++) {

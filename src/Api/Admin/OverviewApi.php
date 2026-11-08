@@ -33,31 +33,7 @@ final class OverviewApi
         foreach ($devices as $d) {
             $v = $d['app_version'] ?? 'unknown';
             $versions[$v] = ($versions[$v] ?? 0) + 1;
-            $reasons = [];
-            if (!$d['online']) {
-                $reasons[] = $d['last_seen_at'] === null ? 'never checked in' : 'offline';
-            } elseif (!$d['policy_current']) {
-                $reasons[] = 'policy not applied yet';
-            }
-            $state = is_array($d['state']) ? $d['state'] : [];
-            if (($state['start_on_boot_permission'] ?? true) === false) {
-                $reasons[] = 'missing "Display over other apps" permission';
-            }
-            if (($state['lockdown'] ?? false) === true) {
-                if (($state['lockdown_mode'] ?? null) === 'partial' && ($state['accessibility_helper'] ?? true) === false) {
-                    $reasons[] = 'lockdown can be escaped: accessibility helper is off';
-                } elseif (in_array($state['lockdown_mode'] ?? null, ['owner', 'mdm'], true)
-                    && ($state['lock_task'] ?? true) === false) {
-                    $reasons[] = 'lockdown on but not locked';
-                }
-            }
-            if (!empty($state['page_error'])) {
-                $reasons[] = 'page error';
-            }
-            // Only once a device has a day of history, so a new tablet isn't flagged for its first hours
-            if ($d['uptime_7d'] !== null && $d['uptime_7d'] < 90 && strtotime((string) $d['enrolled_at']) < time() - 86400) {
-                $reasons[] = "online only {$d['uptime_7d']}% in the last 7 days";
-            }
+            $reasons = array_values(Devices::problems($d, (int) Config::get('alerts.low_battery', 20)));
             if ($reasons !== []) {
                 $attention[] = ['id' => $d['id'], 'name' => $d['name'], 'reasons' => $reasons,
                     'last_seen_at' => $d['last_seen_at']];
@@ -115,20 +91,11 @@ final class OverviewApi
         ];
     }
 
-    /** GET /api/v1/admin/audit?limit=&before=&target_type=&target_id= */
+    /** GET /api/v1/admin/audit?limit=&before=&target_type=&target_id=&actor=&action=&q=&from=&to= */
     public static function audit(Request $req): Response
     {
         AdminAuth::require($req, 'admin');
-        $where = [];
-        $params = [];
-        if (($tt = $req->queryString('target_type')) !== null) {
-            $where[] = 'target_type = :tt';
-            $params['tt'] = $tt;
-        }
-        if (($ti = $req->queryString('target_id')) !== null) {
-            $where[] = 'target_id = :ti';
-            $params['ti'] = $ti;
-        }
+        [$where, $params] = OpsApi::auditFilters($req);
         $before = $req->queryInt('before', 0, 0, PHP_INT_MAX);
         if ($before > 0) {
             $where[] = 'id < :b';

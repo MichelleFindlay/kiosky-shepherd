@@ -34,6 +34,9 @@ final class Commands
             'max_width' => ['type' => 'int', 'min' => 320, 'max' => 1920, 'default' => 960],
             'quality' => ['type' => 'int', 'min' => 10, 'max' => 100, 'default' => 60],
         ]],
+        'diagnostics' => ['label' => 'Collect diagnostics (logs)', 'params' => [
+            'lines' => ['type' => 'int', 'min' => 100, 'max' => 10000, 'default' => 2000],
+        ]],
         'screenshot' => ['label' => 'Take a screenshot', 'params' => [
             'max_width' => ['type' => 'int', 'min' => 320, 'max' => 4096, 'default' => 1280],
             'quality' => ['type' => 'int', 'min' => 10, 'max' => 100, 'default' => 70],
@@ -255,6 +258,7 @@ final class Commands
             'status' => $row['status'],
             'result' => $row['result'] === null ? null : Db::decode($row['result'], null),
             'has_attachment' => $row['attachment'] !== null,
+            'attachment_kind' => $row['attachment'] === null ? null : ($row['type'] === 'diagnostics' ? 'download' : 'image'),
             'created_by' => $row['created_by_name'] ?? null,
             'schedule' => isset($row['schedule_name']) ? ['id' => (int) $row['schedule_id'], 'name' => $row['schedule_name']] : null,
             'created_at' => Util::iso($row['created_at']),

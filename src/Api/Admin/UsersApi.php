@@ -30,7 +30,7 @@ final class UsersApi
             // The identity provider sets this user's role at every sign-in
             'role_managed' => $sso !== null && (OidcProvider::find($sso)?->managesRoles() ?? false),
             'role' => $u['role'],
-            'two_factor' => AdminAuth::hasTotp($u),
+            'two_factor' => AdminAuth::hasSecondFactor($u),
             'scope_tags' => AdminAuth::scopeOf($u),
             'disabled' => (bool) $u['disabled'],
             'created_at' => Util::iso($u['created_at']),
@@ -150,7 +150,7 @@ final class UsersApi
         if (($b['reset_2fa'] ?? null) === true) {
             if ($id === $p->adminId) {
                 $errors['reset_2fa'] = 'Turn off your own two-factor sign-in under Your account.';
-            } elseif (AdminAuth::hasTotp($user)) {
+            } elseif (AdminAuth::hasSecondFactor($user)) {
                 $changes += ['totp_secret' => null, 'totp_last_step' => null, 'totp_recovery' => null];
             }
         }
@@ -166,6 +166,13 @@ final class UsersApi
         }
         if ($changes !== []) {
             Db::update('admins', $changes, ['id' => $id]);
+            // A new password, a disabled account or a 2FA reset signs the user out everywhere
+            if (isset($changes['password_hash']) || !empty($changes['disabled']) || array_key_exists('totp_secret', $changes)) {
+                AdminAuth::endSessions($id);
+            }
+            if (array_key_exists('totp_secret', $changes) && \Shepherd\Migrator::has('webauthn_credentials')) {
+                Db::run('DELETE FROM webauthn_credentials WHERE admin_id = :a', ['a' => $id]);
+            }
             $logged = $changes;
             if (isset($logged['password_hash'])) {
                 $logged['password_hash'] = 'changed';

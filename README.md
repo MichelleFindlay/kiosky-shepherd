@@ -7,7 +7,8 @@ tablets, in plain PHP and MySQL. Tablets enroll with a code or QR code. After
 that, their settings come only from the server and the local controls are
 locked down.
 
-- **Enrollment** with expiring, limited-use codes, shown as QR codes or typed by hand
+- **Enrollment** with expiring, limited-use codes, shown as QR codes or typed by
+  hand, that can tag new devices and fill in their notes
 - **Profiles**: named policies (start page, allowed sites, toolbar lockdown,
   technician PIN, boot, screen, orientation, updates…) with per-device overrides
 - **Remote commands**: reload, open a page, restart, clear cache or sign-out
@@ -21,10 +22,16 @@ locked down.
   for test builds. The server reads each APK's real version and package name.
 - **Monitoring**: online status, current page, permissions, versions, event log,
   a screenshot gallery, **live view**, daily **health history** (uptime, battery,
-  Wi-Fi) with charts, and **offline alerts** by email, Slack, Teams, Discord,
-  ntfy or any webhook
-- **Web console** with viewer / operator / admin roles, **two-factor sign-in**,
-  **API tokens** for scripts, and a full **audit log**
+  Wi-Fi) with charts, and **alerts** (offline, page errors, low battery,
+  escapable lockdown…) by email, Slack, Teams, Discord, ntfy, any webhook or browser
+  push, with quiet hours and maintenance silences
+- **Operations**: database backups you can download, a weekly fleet report email,
+  CSV exports of devices and the audit log, outgoing event webhooks and a
+  Prometheus `/metrics` endpoint
+- **Web console** with viewer / operator / admin roles, **two-factor sign-in**
+  (authenticator app or **passkeys**, optionally required), session management,
+  **API tokens** for scripts, and a searchable **audit log**. It installs as an
+  app on phones and desktops.
 - **Profile history** with what changed in each save and one-click restore, and
   **export and import** as JSON for backups or copying setups between servers
 - **Users limited to some devices** (by tag), e.g. one building's site manager
@@ -186,6 +193,11 @@ There is no database change. PHP needs write access to `storage/` to save settin
 It also adds CIDR ranges and the `cloudflare` / `private` presets to `trusted_proxies`,
 `client_ip_header`, and **Server → Network** (see [Reverse proxies and Cloudflare](#reverse-proxies-and-cloudflare)).
 
+**Next release** adds `sql/migrations/006_operations.sql` (applied automatically),
+`admin/sw.js` and `admin/manifest.webmanifest`. With alerts set up, page errors,
+escapable lockdown and low battery are now reported too; untick them under
+Server → Settings → Alerts if you only want offline alerts.
+
 **1.5.0** adds `sql/migrations/005_release_channels.sql` (applied automatically)
 and the **Release channel** policy setting, so device policies change once more.
 Existing releases become stable.
@@ -264,29 +276,57 @@ too); "all devices" in a bulk command means all of *their* devices. They can't s
 enrollment codes or schedules, which act on the whole fleet, and they can't remove
 their own tags from a device. Admins always see everything.
 
-## Two-factor sign-in
+## Two-factor sign-in, passkeys and sessions
 
-Password users can add a code from an authenticator app (Microsoft Authenticator,
-Google Authenticator, 1Password, Bitwarden…) under **Your account → Two-factor
-sign-in**. Turning it on shows ten single-use recovery codes; each signs in once
-if the phone is lost. Single sign-on users get their provider's MFA instead, and
-API tokens are not affected.
+Password users can add a second step under **Your account**:
+
+- **An authenticator app** (Microsoft Authenticator, Google Authenticator,
+  1Password, Bitwarden…). Turning it on shows ten single-use recovery codes.
+- **Passkeys**: fingerprint, face or device PIN on this device, a phone or a
+  security key. A passkey works as the second step after the password, or as the
+  whole sign-in (**Sign in with a passkey** on the sign-in page). Passkeys are tied
+  to the host in `base_url`, so open the console at that address.
+
+**Require two-factor sign-in** (Server → Settings) makes password users without
+either set one up before they can do anything else. Single sign-on users get their
+provider's MFA instead, and API tokens are not affected.
+
+**Sessions** under Your account lists your signed-in browsers and signs out any of
+them, or all but this one. Changing your password signs out every other browser, as
+do an admin resetting your password, disabling you or resetting your 2FA. Tick
+**Email me when my account signs in from a new browser** (with your email address
+set) to hear about sign-ins from browsers you haven't used before.
 
 Locked out?
 
-- Another admin can click **Reset 2FA** for you under **Users**.
+- Another admin can click **Reset 2FA** for you under **Users** (this also removes
+  your passkeys).
 - With SSH: `php bin/create-admin.php <you> admin` sets a new password and turns
   two-factor sign-in off.
 - With only phpMyAdmin: `UPDATE admins SET totp_secret = NULL, totp_last_step = NULL, totp_recovery = NULL WHERE username = 'you';`
+  and `DELETE FROM webauthn_credentials WHERE admin_id = <your id>;`
 
-## Offline alerts
+## Alerts
 
-Fill in `alerts` in `config/config.php` (see `config.example.php`) with email
-addresses and/or webhooks, then click **Send test alert** on the Overview page.
-Every cron run, devices that haven't checked in for `offline_minutes` (default
-15, never less than 3 check-in intervals) are reported in one message, and again
-in one message when they come back. Devices that never checked in, retired
-devices and devices tagged `no-alerts` (`ignore_tags`) are left out.
+Set up the channels under **Server → Settings → Alerts** (or `alerts` in
+`config/config.php`): email addresses, webhooks, and **browser notifications**
+(Your account → Notifications on this device). **Send test alert** on the Overview
+tries them all.
+
+Every cron run reports, in one message each:
+
+- devices that haven't checked in for `offline_minutes` (default 15, never less
+  than 3 check-in intervals), and again when they come back;
+- the problems ticked under **Also alert about**: page errors, lockdown that can be
+  escaped, low battery (below the threshold and not charging), a missing
+  permission, policy not applied, low uptime. Each is reported once it has lasted
+  two cron runs (so flickers don't alert) and again when it clears.
+
+**Quiet hours** hold alerts back (e.g. 22:00 to 07:00); whatever is still wrong when
+they end is reported then. **Silences** pause alerts for one device (its page →
+Alerts), a tag or everything (Overview → Server) for an hour up to a week, for
+maintenance. Devices that never checked in, retired devices and devices tagged
+`no-alerts` (`ignore_tags`) are never reported.
 
 | `type` | Sends |
 | --- | --- |
@@ -294,9 +334,13 @@ devices and devices tagged `no-alerts` (`ignore_tags`) are left out.
 | `teams` | An Adaptive Card, for a Teams **Workflows** webhook ("Post to a channel when a webhook request is received") |
 | `discord` | `{"content": …}` |
 | `ntfy` | Plain text with a title, to an [ntfy](https://ntfy.sh) topic URL |
-| `json` | `{"event": "devices_offline" \| "devices_online" \| "test", "title", "text", "devices": [{id, name, last_seen_at}], "console", "server", "sent_at"}` |
+| `json` | `{"event": "devices_offline" \| "devices_online" \| "device_problems" \| "device_problems_resolved" \| "test", "title", "text", "devices": [{id, name, last_seen_at}], "console", "server", "sent_at"}` |
 
-Each webhook can add `'headers' => ['Authorization' => '…']`.
+Each webhook can add `'headers' => ['Authorization' => '…']` in config.php.
+
+**Browser notifications** need HTTPS. They go to users who see the whole fleet
+(not users limited to some devices). On iPhone and iPad, add the console to the
+Home Screen first (Share → Add to Home Screen), then turn notifications on there.
 
 ### Email and SMTP
 
@@ -322,6 +366,71 @@ most others. Certificates are checked (`verify_peer`), and a password is never s
 over an unencrypted connection except to this machine. **Server → Email** shows
 how mail is sent and sends a test message. The SMTP settings can only be set in
 config.php, because whoever controls the SMTP host would receive the password.
+
+## Operations
+
+- **Database backups** (Server → Database backups): **Back up now** writes the
+  whole database as gzipped SQL into `storage/backups/` and lets you download it;
+  turn on **Back up the database every night** (after 03:00) under Settings and
+  choose how many to keep. Restore by importing the file in phpMyAdmin, or
+  `gunzip -c db-….sql.gz | mysql <database>`. Backups contain password hashes and
+  two-factor secrets, so keep downloaded copies safe.
+- **Weekly report**: turn on **Email a weekly fleet report** under Settings for a
+  Monday-morning email (offline devices, least reliable tablets, versions, failed
+  commands, changes and failed sign-ins). Server → Reports and integrations
+  previews it and sends it on demand.
+- **CSV exports**: Devices → **Export CSV** (with the current filters; name, IDs,
+  profile, tags, model, versions, IP, online, 7-day uptime, battery, Wi-Fi, page,
+  last seen, notes), and Audit log → **Export CSV** with its filters (who, action,
+  free text, dates).
+- **Enrollment codes** can add tags and notes to every device that enrolls with
+  them, so new tablets arrive ready for schedules, release rings and scoped users.
+- **Diagnostics**: the **Collect diagnostics (logs)** command asks a tablet for its
+  recent logs and WebView errors, downloadable from the command list (needs a
+  Kiosky version that supports it, see the protocol).
+
+### Event webhooks
+
+Under **Server → Settings → Integrations**, add URLs that receive a JSON POST when
+something happens: `device.enrolled`, `device.retired`, `device.offline`,
+`device.online`, `device.problem`, `device.problem_resolved`,
+`device.profile_changed`, `command.failed`, `profile.updated` (all, or the ones
+you tick). The body is `{"event", "at", "server", "data": {…}}`. With a secret,
+each request has `X-Shepherd-Signature: sha256=<hex HMAC-SHA256 of the body>`; check
+it before trusting the request. Events are sent straight after the request that
+caused them and retried with backoff for a few hours; Server → Reports and
+integrations shows recent deliveries and sends a test. Good targets: Home
+Assistant webhook automations, n8n, Zapier, or a ticketing system.
+
+### Prometheus
+
+`GET /metrics` serves Prometheus metrics to an API token (viewer is enough):
+
+```yaml
+scrape_configs:
+  - job_name: kiosky
+    scheme: https
+    metrics_path: /metrics
+    bearer_token: shp_…
+    static_configs:
+      - targets: ['kiosks.example.com']
+```
+
+Per device (labelled `uid`, `name`): `kiosky_device_up`,
+`kiosky_device_last_checkin_age_seconds`, `kiosky_device_battery_percent`,
+`kiosky_device_charging`, `kiosky_device_wifi_rssi_dbm`,
+`kiosky_device_uptime_7d_ratio`, `kiosky_device_policy_applied` and
+`kiosky_device_info` (profile, version, model, tags). Fleet-wide: `kiosky_devices`,
+`kiosky_devices_online`, `kiosky_commands_pending`,
+`kiosky_cron_last_run_timestamp_seconds` and `kiosky_shepherd_info`. A token of a
+user limited to some devices only sees those.
+
+## Page playlist
+
+The **Page playlist** policy settings rotate a tablet between several pages (say a
+dashboard, cameras and a calendar), each for a set time, pausing after a touch. They
+need a Kiosky version that supports them ([docs/PROTOCOL.md](docs/PROTOCOL.md) §5.2); others ignore
+them.
 
 ## Scheduled commands
 
@@ -633,6 +742,7 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `GET /api/v1/admin/devices/{id}/events` | viewer | Event log |
 | `POST /api/v1/admin/devices/{id}/commands` | operator | `{type, params, ttl_hours}` |
 | `POST /api/v1/admin/devices/{id}/watch` | viewer | Ask the device to check in every `fast_checkin_seconds` for the next 2 minutes |
+| `GET /api/v1/admin/devices/export` | viewer | Devices as CSV (`?status=&tag=&profile_id=`) |
 | `GET /api/v1/admin/devices/{id}/history` | viewer | `?days=7–90`: daily uptime, battery, Wi-Fi and page errors |
 | `GET /api/v1/admin/devices/{id}/live` | viewer | The latest live-view frame (404 when none in the last minute) |
 | `GET /api/v1/admin/tags` | viewer | Tags in use, with device counts |
@@ -660,7 +770,18 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `PUT/DELETE /api/v1/admin/releases/rings/{tag}` | admin | `{release: "latest" \| "1.2.0"}` / remove |
 | `GET/POST/PATCH/DELETE /api/v1/admin/users[/{id}]` | admin | Console users. `PATCH {reset_2fa: true}` turns off someone's two-factor sign-in; `scope_tags: [..] \| null` limits a user to devices with those tags. |
 | `GET/POST/DELETE /api/v1/admin/tokens[/{id}]` | viewer+ | API tokens (created from the console only) |
-| `GET /api/v1/admin/audit` | admin | `?before=&target_type=&target_id=` |
+| `GET /api/v1/admin/audit` | admin | `?before=&target_type=&target_id=&actor=&action=&q=&from=&to=` |
+| `GET /api/v1/admin/audit/export` | admin | The audit log as CSV, same filters |
+| `GET/POST/DELETE /api/v1/admin/alerts/silences[/{id}]` | viewer / operator | Alert silences: `{device_id \| tag \| all: true, minutes, note}` |
+| `GET/POST /api/v1/admin/system/backups`, `GET/DELETE …/backups/{name}` | admin | Database backups: list, make one now, download, delete |
+| `GET/POST /api/v1/admin/system/report` | admin | Weekly report preview / send now |
+| `GET /api/v1/admin/events`, `POST …/events/test` | admin | Event types and recent deliveries / send a test event |
+| `GET /metrics` (or `/api/v1/admin/metrics`) | viewer | Prometheus metrics |
+| `GET/POST/DELETE /api/v1/admin/push`, `POST …/push/test` | console | Browser push: public key, subscribe, unsubscribe, test |
+| `GET /api/v1/admin/session/sessions`, `DELETE …/sessions/{id}`, `POST …/sessions/end-others` | console | Your signed-in browsers |
+| `…/session/passkeys` (GET, POST, DELETE `/{id}`, POST `/options`); `POST …/session/passkey[/options]` | console | Your passkeys; signing in with one |
+| `PATCH /api/v1/admin/session/account` | console | `{email, login_alerts}` |
+| `GET /api/v1/admin/commands/{id}/attachment` | viewer | A diagnostics bundle or screenshot |
 | `GET /api/v1/admin/login-options` | none | Whether password sign-in is on, and the single sign-on providers |
 | `POST /api/v1/admin/migrate` | admin | Apply pending database migrations; `GET …/session` lists them under `server.pending_migrations` |
 | `POST /api/v1/admin/alerts/test` | admin | Send a test message to every alert channel |
@@ -690,6 +811,11 @@ The device API (`/api/v1/device/…`) is documented in [docs/PROTOCOL.md](docs/P
   (SHA-256 for random tokens, bcrypt/argon via `password_hash` for passwords).
 - The console uses a `SameSite=Strict`, `HttpOnly`, `Secure` session cookie, plus
   a CSRF token on every change. Its CSP allows only same-origin scripts and styles.
+- Passkeys follow WebAuthn: the challenge, origin, relying party (the host of
+  `base_url`), user-presence and signature are checked on every use, signing in
+  with a passkey alone also needs user verification, and a counter that goes
+  backwards is refused. Browser push is VAPID-signed and end-to-end encrypted, and
+  only accepted for the known browser push services.
 - Forwarding headers (client IP, HTTPS) are only believed from `trusted_proxies`,
   which can only be set in config.php.
 - Logins, two-factor codes, enrollment and first-run setup are rate-limited per IP

@@ -63,6 +63,20 @@ final class Policy
             'default' => 'auto', 'group' => 'Device', 'label' => 'Screen orientation', 'help' => '',
         ],
 
+        // --- Page playlist (needs Kiosky support, see docs/PROTOCOL.md §5.2) -------
+        'playlist.urls' => [
+            'type' => 'urls', 'default' => [], 'group' => 'Page playlist', 'label' => 'Pages to rotate through',
+            'help' => 'One https:// address per line, shown in turn after the start page. Empty: just the start page. Their hosts are always allowed. Needs a Kiosky version that supports playlists.',
+        ],
+        'playlist.seconds' => [
+            'type' => 'int', 'min' => 10, 'max' => 86400, 'default' => 60, 'group' => 'Page playlist',
+            'label' => 'Show each page for (seconds)', 'help' => '',
+        ],
+        'playlist.pause_on_touch_seconds' => [
+            'type' => 'int', 'min' => 0, 'max' => 3600, 'default' => 120, 'group' => 'Page playlist',
+            'label' => 'After a touch, pause the rotation for (seconds)', 'help' => '0 keeps rotating while someone uses the screen.',
+        ],
+
         // --- Screen schedule (needs Kiosky support, see docs/PROTOCOL.md §5.2) -----
         'screen.off_at' => [
             'type' => 'time', 'default' => '', 'group' => 'Screen schedule', 'label' => 'Turn the screen off at',
@@ -254,6 +268,26 @@ final class Policy
                     return null;
                 }
                 return $v;
+
+            case 'urls':
+                if (is_string($v)) {
+                    $v = preg_split('/[\s]+/', trim($v), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+                }
+                if (!is_array($v) || !array_is_list($v) || count($v) > 20) {
+                    $err = 'Use up to 20 https:// addresses.';
+                    return null;
+                }
+                $urls = [];
+                foreach ($v as $u) {
+                    $e = null;
+                    $n = self::normalise(['type' => 'url'], $u, $e);
+                    if ($e !== null || $n === '') {
+                        $err = 'Not an https:// address: ' . Util::clip(is_string($u) ? $u : '', 80);
+                        return null;
+                    }
+                    $urls[] = $n;
+                }
+                return $urls;
 
             case 'hosts':
                 if (is_string($v)) {

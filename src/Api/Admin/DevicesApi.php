@@ -264,6 +264,7 @@ final class DevicesApi
             Db::insert('device_events', ['device_id' => $id, 'type' => 'retired', 'data' => null]);
         });
         Audit::log($p, 'device.retired', 'device', $id, ['name' => $d['name']]);
+        \Shepherd\Events::emit('device.retired', ['device' => \Shepherd\Events::device($d), 'by' => $p->name]);
         return Response::json(Devices::present(Devices::find($id), true));
     }
 

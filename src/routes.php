@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Shepherd\Api\Admin\CommandsApi;
 use Shepherd\Api\Admin\DevicesApi;
 use Shepherd\Api\Admin\EnrollmentApi;
+use Shepherd\Api\Admin\OpsApi;
 use Shepherd\Api\Admin\OverviewApi;
 use Shepherd\Api\Admin\ProfilesApi;
 use Shepherd\Api\Admin\ReleasesApi;
@@ -20,6 +21,8 @@ use Shepherd\Http\Router;
 return static function (Router $r): void {
     $r->get('/', static fn () => Response::redirect('/admin/'));
     $r->get('/api/v1/health', static fn () => Response::json(['ok' => true, 'version' => SHEPHERD_VERSION]));
+    // Prometheus' default path; authenticate with an API token (bearer_token)
+    $r->get('/metrics', [OpsApi::class, 'metrics']);
 
     // ---- Device API (called by Kiosky) ---------------------------------------
     $r->post('/api/v1/device/enroll', [DeviceApi::class, 'enroll']);
@@ -35,6 +38,16 @@ return static function (Router $r): void {
     $r->delete("$a/session", [SessionApi::class, 'logout']);
     $r->post("$a/session/password", [SessionApi::class, 'changePassword']);
     $r->post("$a/session/2fa", [SessionApi::class, 'secondFactor']);
+    $r->post("$a/session/passkey/options", [SessionApi::class, 'passkeyOptions']);
+    $r->post("$a/session/passkey", [SessionApi::class, 'passkeySignIn']);
+    $r->get("$a/session/passkeys", [SessionApi::class, 'passkeys']);
+    $r->post("$a/session/passkeys/options", [SessionApi::class, 'passkeyRegistrationOptions']);
+    $r->post("$a/session/passkeys", [SessionApi::class, 'addPasskey']);
+    $r->delete("$a/session/passkeys/{id}", [SessionApi::class, 'deletePasskey']);
+    $r->get("$a/session/sessions", [SessionApi::class, 'sessions']);
+    $r->post("$a/session/sessions/end-others", [SessionApi::class, 'endOtherSessions']);
+    $r->delete("$a/session/sessions/{id}", [SessionApi::class, 'endSession']);
+    $r->patch("$a/session/account", [SessionApi::class, 'updateAccount']);
     $r->post("$a/session/2fa/setup", [SessionApi::class, 'totpSetup']);
     $r->post("$a/session/2fa/enable", [SessionApi::class, 'totpEnable']);
     $r->post("$a/session/2fa/disable", [SessionApi::class, 'totpDisable']);
@@ -50,6 +63,23 @@ return static function (Router $r): void {
 
     $r->get("$a/overview", [OverviewApi::class, 'overview']);
     $r->get("$a/audit", [OverviewApi::class, 'audit']);
+    $r->get("$a/audit/export", [OpsApi::class, 'exportAudit']);
+    $r->get("$a/metrics", [OpsApi::class, 'metrics']);
+    $r->get("$a/alerts/silences", [OpsApi::class, 'silences']);
+    $r->post("$a/alerts/silences", [OpsApi::class, 'silence']);
+    $r->delete("$a/alerts/silences/{id}", [OpsApi::class, 'unsilence']);
+    $r->get("$a/push", [OpsApi::class, 'pushInfo']);
+    $r->post("$a/push", [OpsApi::class, 'pushSubscribe']);
+    $r->delete("$a/push", [OpsApi::class, 'pushUnsubscribe']);
+    $r->post("$a/push/test", [OpsApi::class, 'pushTest']);
+    $r->get("$a/events", [OpsApi::class, 'events']);
+    $r->post("$a/events/test", [OpsApi::class, 'testEvent']);
+    $r->get("$a/system/backups", [OpsApi::class, 'backups']);
+    $r->post("$a/system/backups", [OpsApi::class, 'createBackup']);
+    $r->get("$a/system/backups/{name}", [OpsApi::class, 'downloadBackup']);
+    $r->delete("$a/system/backups/{name}", [OpsApi::class, 'deleteBackup']);
+    $r->get("$a/system/report", [OpsApi::class, 'report']);
+    $r->post("$a/system/report", [OpsApi::class, 'sendReport']);
     $r->post("$a/alerts/test", [OverviewApi::class, 'testAlerts']);
     $r->get("$a/system/network", [SystemApi::class, 'network']);
     $r->get("$a/system/mail", [SystemApi::class, 'mail']);
@@ -63,6 +93,7 @@ return static function (Router $r): void {
     $r->get("$a/policy/schema", [ProfilesApi::class, 'schema']);
 
     $r->get("$a/devices", [DevicesApi::class, 'list']);
+    $r->get("$a/devices/export", [OpsApi::class, 'exportDevices']); // before devices/{id}
     $r->get("$a/devices/{id}", [DevicesApi::class, 'get']);
     $r->patch("$a/devices/{id}", [DevicesApi::class, 'update']);
     $r->delete("$a/devices/{id}", [DevicesApi::class, 'retire']);
@@ -96,6 +127,7 @@ return static function (Router $r): void {
     $r->post("$a/commands", [CommandsApi::class, 'create']);
     $r->delete("$a/commands/{id}", [CommandsApi::class, 'cancel']);
     $r->get("$a/commands/{id}/screenshot", [CommandsApi::class, 'screenshot']);
+    $r->get("$a/commands/{id}/attachment", [CommandsApi::class, 'attachment']);
 
     $r->get("$a/schedules", [SchedulesApi::class, 'list']);
     $r->post("$a/schedules", [SchedulesApi::class, 'create']);

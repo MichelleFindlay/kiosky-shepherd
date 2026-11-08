@@ -127,6 +127,8 @@ final class ProfilesApi
             Policy::forgetProfile($id);
             if (self::snapshotChanged($row, $id)) {
                 ProfileHistory::record($id, 'saved', $p);
+                \Shepherd\Events::emit('profile.updated', ['profile' => ['id' => $id, 'name' => $name ?? $row['name']],
+                    'settings_changed' => $changedKeys, 'by' => $p->name]);
             }
             Audit::log($p, 'profile.updated', 'profile', $id,
                 array_filter(['name' => $name, 'settings_changed' => $changedKeys ?: null]));

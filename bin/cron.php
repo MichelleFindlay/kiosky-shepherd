@@ -42,6 +42,28 @@ if (\Shepherd\Migrator::tableExists('scheduled_commands')) {
     $extra[] = 'database update pending: schedules and alerts are off';
 }
 
+// Event webhooks that couldn't be delivered straight away, nightly database backup, weekly report
+foreach ([
+    'events' => static fn () => ($n = \Shepherd\Events::flush()) ? "delivered $n events" : null,
+    'backup' => static fn () => \Shepherd\DbBackup::cron(),
+    'report' => static fn () => \Shepherd\Report::cron(),
+] as $job => $fn) {
+    try {
+        $r = $fn();
+        if ($r !== null) {
+            $extra[] = $r;
+        }
+    } catch (\Throwable $e) {
+        error_log("[kiosky-shepherd] cron $job: " . $e->getMessage());
+        $extra[] = "$job failed: " . $e->getMessage();
+    }
+}
+\Shepherd\Events::prune();
+if (\Shepherd\Migrator::tableExists('admin_sessions')) {
+    Db::run('DELETE FROM admin_sessions WHERE (ended_at IS NOT NULL AND ended_at < NOW() - INTERVAL 90 DAY)
+                                           OR last_seen_at < NOW() - INTERVAL 90 DAY');
+}
+
 // Keeps Cloudflare's address ranges current when trusted_proxies includes 'cloudflare'
 try {
     $cf = \Shepherd\Http\TrustedProxies::refreshCloudflare();
@@ -67,6 +89,7 @@ $old = Db::all("SELECT id, attachment FROM commands
 foreach ($old as $c) {
     if ($c['attachment'] !== null) {
         @unlink(Config::storage('screenshots') . '/' . basename((string) $c['attachment']));
+        @unlink(Config::storage('diagnostics') . '/' . basename((string) $c['attachment']));
     }
 }
 $commands = Db::run("DELETE FROM commands WHERE status IN ('done', 'failed', 'expired', 'cancelled')

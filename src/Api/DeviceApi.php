@@ -89,6 +89,18 @@ final class DeviceApi
                 ]);
             }
             Db::run('UPDATE enrollment_tokens SET uses = uses + 1 WHERE id = :id', ['id' => (int) $tok['id']]);
+            // The code's tags are added to the device's, and its notes fill in empty notes
+            $codeTags = array_values((array) Db::decode($tok['tags'] ?? null));
+            if ($codeTags !== [] && \Shepherd\Migrator::has('device_tags')) {
+                $current = array_column(Db::all('SELECT tag FROM device_tags WHERE device_id = :d', ['d' => $deviceId]), 'tag');
+                $merged = array_slice(array_values(array_unique(array_merge($current, $codeTags))), 0, \Shepherd\Devices::MAX_TAGS);
+                sort($merged);
+                \Shepherd\Devices::setTags($deviceId, $merged);
+            }
+            if (is_string($tok['notes'] ?? null) && $tok['notes'] !== '') {
+                Db::run("UPDATE devices SET notes = :n WHERE id = :id AND (notes IS NULL OR notes = '')",
+                    ['n' => $tok['notes'], 'id' => $deviceId]);
+            }
             Db::insert('device_events', [
                 'device_id' => $deviceId,
                 'type' => $existing !== null ? 're_enrolled' : 'enrolled',
@@ -105,6 +117,8 @@ final class DeviceApi
         $policy = Policy::forDevice($device);
         Db::update('devices', ['checkin_seconds' => (int) $policy['checkin_seconds'], 'last_ip' => $req->ip()],
             ['id' => (int) $device['id']]);
+        \Shepherd\Events::emit('device.enrolled', ['device' => \Shepherd\Events::device(\Shepherd\Devices::find((int) $device['id']) ?? $device),
+            're_enrolled' => $reused, 'model' => $fields['model']]);
 
         return Response::json([
             'device_id' => $device['uid'],
@@ -248,6 +262,10 @@ final class DeviceApi
         if ($cmd['type'] === 'screenshot' && $status === 'done' && is_string($shot) && $shot !== '') {
             $attachment = self::saveScreenshot($id, $shot);
         }
+        $bundle = $req->input('bundle');
+        if ($cmd['type'] === 'diagnostics' && is_string($bundle) && $bundle !== '') {
+            $attachment = self::saveBundle($id, $bundle);
+        }
 
         Db::update('commands', [
             'status' => $status,
@@ -255,6 +273,10 @@ final class DeviceApi
             'attachment' => $attachment,
             'completed_at' => Util::now(),
         ], ['id' => $id]);
+        if ($status === 'failed') {
+            \Shepherd\Events::emit('command.failed', ['command' => ['id' => $id, 'type' => $cmd['type'], 'message' => $result['message']],
+                'device' => \Shepherd\Events::device($device)]);
+        }
 
         return Response::json(['ok' => true, 'status' => $status]);
     }
@@ -314,6 +336,37 @@ final class DeviceApi
         [$bin, $ext] = self::decodeImage($shot);
         Devices::saveLiveFrame((int) $device['id'], $bin, $ext);
         return Response::json(['ok' => true]);
+    }
+
+    /**
+     * A diagnostics bundle: base64 of a .gz, a .zip or plain text, at most
+     * max_diagnostics_mb (10 MB) decoded. Stored as storage/diagnostics/diag-<id>.<ext>.
+     */
+    private static function saveBundle(int $commandId, string $b64): string
+    {
+        $max = (int) Config::get('max_diagnostics_mb', 10) * 1024 * 1024;
+        if (strlen($b64) > $max * 4 / 3 + 16) {
+            throw new HttpError(413, 'too_large', 'The diagnostics bundle is too large.');
+        }
+        $bin = base64_decode($b64, true);
+        if ($bin === false) {
+            throw HttpError::validation(['bundle' => 'Must be base64.']);
+        }
+        $ext = match (true) {
+            str_starts_with($bin, "\x1F\x8B") => 'gz',
+            str_starts_with($bin, "PK\x03\x04") => 'zip',
+            mb_check_encoding($bin, 'UTF-8') => 'txt',
+            default => throw HttpError::validation(['bundle' => 'Send a .gz, a .zip or UTF-8 text.']),
+        };
+        $dir = Config::storage('diagnostics');
+        if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
+            throw new \RuntimeException("Cannot create $dir");
+        }
+        $name = "diag-$commandId.$ext";
+        if (file_put_contents("$dir/$name", $bin, LOCK_EX) === false) {
+            throw new \RuntimeException("Cannot write $dir/$name");
+        }
+        return $name;
     }
 
     /** GET /api/v1/device/releases/{id}/download */

@@ -8,6 +8,7 @@ use Shepherd\Audit;
 use Shepherd\Auth\AdminAuth;
 use Shepherd\Auth\OidcProvider;
 use Shepherd\Auth\Principal;
+use Shepherd\Auth\Passkeys;
 use Shepherd\Auth\Totp;
 use Shepherd\Config;
 use Shepherd\Db;
@@ -40,9 +41,13 @@ final class SessionApi
             throw $e;
         }
         RateLimiter::clear('login-user:' . strtolower($username));
-        if (AdminAuth::hasTotp($admin)) {
+        if (AdminAuth::hasSecondFactor($admin)) {
             AdminAuth::beginSecondFactor($req, $admin);
-            return Response::json(['two_factor_required' => true]);
+            $methods = array_values(array_filter([
+                AdminAuth::hasTotp($admin) ? 'totp' : null,
+                Passkeys::count((int) $admin['id']) > 0 ? 'passkey' : null,
+            ]));
+            return Response::json(['two_factor_required' => true, 'methods' => $methods]);
         }
         [$p, $csrf] = AdminAuth::establish($req, $admin);
         Audit::log($p, 'admin.login', 'admin', $p->id);
@@ -70,9 +75,189 @@ final class SessionApi
             throw new HttpError(401, 'two_factor_failed', 'That code is wrong or has already been used.');
         }
         RateLimiter::clear('2fa-user:' . $id);
-        [$p, $csrf] = AdminAuth::establish($req, $admin);
+        [$p, $csrf] = AdminAuth::establish($req, $admin, null, 'password+' . $via);
         Audit::log($p, 'admin.login', 'admin', $p->id, ['via' => $via]);
         return Response::json(self::sessionInfo($p, $csrf));
+    }
+
+    // ---- Passkeys: sign-in ---------------------------------------------------------
+
+    /**
+     * POST /api/v1/admin/session/passkey/options  {mode: "login" | "second"}
+     * login: any passkey for this site (sign in with a passkey alone).
+     * second: the passkeys of the user who just entered their password.
+     */
+    public static function passkeyOptions(Request $req): Response
+    {
+        Migrator::requireTable('webauthn_credentials');
+        RateLimiter::hit('passkey-ip:' . $req->ip(), 60, 900);
+        AdminAuth::startSession($req);
+        if ($req->input('mode') === 'second') {
+            $id = AdminAuth::pendingSecondFactor($req)
+                ?? throw new HttpError(401, 'two_factor_expired', 'The sign-in took too long. Enter your password again.');
+            return Response::json(Passkeys::assertionOptions($id));
+        }
+        if (!Config::get('password_login', true)) {
+            throw HttpError::forbidden('Only single sign-on is allowed on this server.');
+        }
+        return Response::json(Passkeys::assertionOptions(null));
+    }
+
+    /** POST /api/v1/admin/session/passkey  {credential: {...}, mode} — finishes a passkey sign-in */
+    public static function passkeySignIn(Request $req): Response
+    {
+        Migrator::requireTable('webauthn_credentials');
+        RateLimiter::hit('passkey-ip:' . $req->ip(), 60, 900);
+        AdminAuth::startSession($req);
+        $second = $req->input('mode') === 'second';
+        $pending = $second ? AdminAuth::pendingSecondFactor($req) : null;
+        if ($second && $pending === null) {
+            throw new HttpError(401, 'two_factor_expired', 'The sign-in took too long. Enter your password again.');
+        }
+        $cred = $req->input('credential');
+        try {
+            $admin = Passkeys::verify(is_array($cred) ? $cred : []);
+        } catch (HttpError $e) {
+            Audit::log(null, 'admin.passkey_failed', 'admin', $pending, ['reason' => $e->getMessage()], $req->ip());
+            throw $e;
+        }
+        if ($admin['sso_provider'] !== null) {
+            throw new HttpError(401, 'passkey_failed', 'This account signs in with single sign-on.');
+        }
+        [$p, $csrf] = AdminAuth::establish($req, $admin, null, $second ? 'password+passkey' : 'passkey');
+        Audit::log($p, 'admin.login', 'admin', $p->id, ['via' => $second ? 'password+passkey' : 'passkey']);
+        return Response::json(self::sessionInfo($p, $csrf));
+    }
+
+    // ---- Passkeys: your own -----------------------------------------------------------
+
+    /** GET /api/v1/admin/session/passkeys */
+    public static function passkeys(Request $req): Response
+    {
+        [, $admin] = self::passwordUser($req);
+        Migrator::requireTable('webauthn_credentials');
+        return Response::json(['items' => array_map(static fn ($c) => [
+            'id' => (int) $c['id'], 'name' => $c['name'],
+            'created_at' => \Shepherd\Util::iso($c['created_at']), 'last_used_at' => \Shepherd\Util::iso($c['last_used_at']),
+        ], Passkeys::forAdmin((int) $admin['id'])), 'rp_id' => Passkeys::rpId()]);
+    }
+
+    /** POST /api/v1/admin/session/passkeys/options  registration options for this browser */
+    public static function passkeyRegistrationOptions(Request $req): Response
+    {
+        [, $admin] = self::passwordUser($req);
+        Migrator::requireTable('webauthn_credentials');
+        return Response::json(Passkeys::registrationOptions($admin));
+    }
+
+    /** POST /api/v1/admin/session/passkeys  {credential, name} */
+    public static function addPasskey(Request $req): Response
+    {
+        [$p, $admin] = self::passwordUser($req);
+        $cred = $req->input('credential');
+        Passkeys::register($admin, is_array($cred) ? $cred : [], (string) $req->input('name', ''));
+        Audit::log($p, 'admin.passkey_added', 'admin', $p->id, ['name' => $req->input('name')]);
+        return Response::json(['ok' => true], 201);
+    }
+
+    /** DELETE /api/v1/admin/session/passkeys/{id} */
+    public static function deletePasskey(Request $req): Response
+    {
+        [$p, $admin] = self::passwordUser($req);
+        $id = $req->intParam('id');
+        if (Config::get('require_2fa', false) && !AdminAuth::hasTotp($admin) && Passkeys::count((int) $admin['id']) <= 1) {
+            throw HttpError::conflict('Your organisation requires two-factor sign-in, and this is your only second factor. Add another first.');
+        }
+        $n = Db::run('DELETE FROM webauthn_credentials WHERE id = :id AND admin_id = :a', ['id' => $id, 'a' => $p->id])->rowCount();
+        if ($n === 0) {
+            throw HttpError::notFound('Passkey');
+        }
+        Audit::log($p, 'admin.passkey_removed', 'admin', $p->id, ['passkey' => $id]);
+        return Response::noContent();
+    }
+
+    // ---- Sessions ----------------------------------------------------------------------
+
+    /** GET /api/v1/admin/session/sessions  your signed-in browsers */
+    public static function sessions(Request $req): Response
+    {
+        $p = AdminAuth::require($req);
+        if ($p->type !== 'admin') {
+            throw HttpError::forbidden('Use the web console.');
+        }
+        Migrator::requireTable('admin_sessions');
+        $current = AdminAuth::currentSessionId();
+        $idle = (int) Config::get('session_lifetime', 43200);
+        $rows = Db::all('SELECT * FROM admin_sessions WHERE admin_id = :a AND ended_at IS NULL
+                          AND last_seen_at > NOW() - INTERVAL :i SECOND ORDER BY last_seen_at DESC LIMIT 50',
+            ['a' => $p->id, 'i' => $idle]);
+        return Response::json(['items' => array_map(static fn ($r) => [
+            'id' => substr((string) $r['id'], 0, 16),
+            'current' => $r['id'] === $current,
+            'ip' => $r['ip'],
+            'user_agent' => $r['user_agent'],
+            'method' => $r['method'],
+            'created_at' => \Shepherd\Util::iso($r['created_at']),
+            'last_seen_at' => \Shepherd\Util::iso($r['last_seen_at']),
+        ], $rows)]);
+    }
+
+    /** DELETE /api/v1/admin/session/sessions/{id}  signs out one of your other browsers */
+    public static function endSession(Request $req): Response
+    {
+        $p = AdminAuth::require($req);
+        Migrator::requireTable('admin_sessions');
+        $prefix = $req->param('id');
+        if (!preg_match('/^[0-9a-f]{16}$/', $prefix)) {
+            throw HttpError::notFound('Session');
+        }
+        $n = Db::run('UPDATE admin_sessions SET ended_at = NOW() WHERE admin_id = :a AND ended_at IS NULL AND id LIKE :p',
+            ['a' => $p->id, 'p' => $prefix . '%'])->rowCount();
+        if ($n === 0) {
+            throw HttpError::notFound('Session');
+        }
+        Audit::log($p, 'admin.session_ended', 'admin', $p->id);
+        return Response::noContent();
+    }
+
+    /** POST /api/v1/admin/session/sessions/end-others  signs out everywhere else */
+    public static function endOtherSessions(Request $req): Response
+    {
+        $p = AdminAuth::require($req);
+        $n = AdminAuth::endSessions($p->id, AdminAuth::currentSessionId());
+        Audit::log($p, 'admin.sessions_ended', 'admin', $p->id, ['count' => $n]);
+        return Response::json(['ended' => $n]);
+    }
+
+    /** PATCH /api/v1/admin/session/account  {email?, login_alerts?} — your own preferences */
+    public static function updateAccount(Request $req): Response
+    {
+        $p = AdminAuth::require($req);
+        if ($p->type !== 'admin') {
+            throw HttpError::forbidden('Use the web console.');
+        }
+        $b = $req->json();
+        $changes = [];
+        $admin = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $p->id]) ?? [];
+        if (array_key_exists('email', $b)) {
+            if ($admin['sso_provider'] !== null) {
+                throw HttpError::validation(['email' => 'Your email comes from single sign-on.']);
+            }
+            $email = is_string($b['email']) ? trim($b['email']) : '';
+            if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+                throw HttpError::validation(['email' => 'Not a valid email address.']);
+            }
+            $changes['email'] = $email === '' ? null : $email;
+        }
+        if (array_key_exists('login_alerts', $b)) {
+            Migrator::requireTable('admin_sessions');
+            $changes['login_alerts'] = (bool) $b['login_alerts'];
+        }
+        if ($changes !== []) {
+            Db::update('admins', $changes, ['id' => $p->id]);
+            Audit::log($p, 'admin.account_updated', 'admin', $p->id, array_keys($changes));
+        }
+        return Response::json(self::sessionInfo($p, AdminAuth::csrfToken()));
     }
 
     /**
@@ -168,6 +353,9 @@ final class SessionApi
     {
         [$p, $admin] = self::passwordUser($req);
         self::confirmPassword($admin, $req);
+        if (Config::get('require_2fa', false) && Passkeys::count((int) $p->id) === 0) {
+            throw HttpError::conflict('Your organisation requires two-factor sign-in. Add a passkey before turning off the authenticator app.');
+        }
         Db::update('admins', ['totp_secret' => null, 'totp_last_step' => null, 'totp_recovery' => null], ['id' => $p->id]);
         Audit::log($p, 'admin.2fa_disabled', 'admin', $p->id);
         return Response::json(['ok' => true]);
@@ -216,10 +404,17 @@ final class SessionApi
         }
         $twoFactor = null;
         $recoveryLeft = null;
+        $extra = [];
         if ($p->type === 'admin') {
             $row = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $p->id]) ?? [];
             $twoFactor = AdminAuth::hasTotp($row);
             $recoveryLeft = $twoFactor ? count(Db::decode($row['totp_recovery'] ?? null)) : null;
+            $extra = [
+                'email' => $row['email'] ?? null,
+                'login_alerts' => (bool) ($row['login_alerts'] ?? false),
+                'passkeys' => Passkeys::count((int) $p->id),
+                'must_setup_2fa' => AdminAuth::mustSetUpSecondFactor($row),
+            ];
         }
         return [
             'user' => [
@@ -231,7 +426,7 @@ final class SessionApi
                 'two_factor' => $twoFactor,
                 'scope_tags' => $p->scopeTags,
                 'recovery_codes_left' => $recoveryLeft,
-            ],
+            ] + $extra,
             'csrf_token' => $csrf,
             'server' => $server,
         ];
@@ -348,7 +543,9 @@ final class SessionApi
         }
         Db::update('admins', ['password_hash' => password_hash($new, PASSWORD_DEFAULT)], ['id' => $p->id]);
         session_regenerate_id(true);
-        Audit::log($p, 'admin.password_changed', 'admin', $p->id);
-        return Response::json(['ok' => true]);
+        // A changed password signs out every other browser
+        $ended = AdminAuth::endSessions($p->id, AdminAuth::currentSessionId());
+        Audit::log($p, 'admin.password_changed', 'admin', $p->id, ['other_sessions_ended' => $ended]);
+        return Response::json(['ok' => true, 'other_sessions_ended' => $ended]);
     }
 }

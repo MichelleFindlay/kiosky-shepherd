@@ -64,6 +64,11 @@ DirectoryIndex index.php index.html
     </IfModule>
 </IfModule>
 
+# The console can be installed as an app (and receive push notifications)
+<IfModule mod_mime.c>
+    AddType application/manifest+json .webmanifest
+</IfModule>
+
 # Uploading APKs through the console. Some hosts ignore these here; if uploads
 # fail, set the same values in the control panel's PHP settings / .user.ini.
 <IfModule mod_php.c>

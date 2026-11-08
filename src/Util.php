@@ -63,6 +63,28 @@ final class Util
         return 'https://' . $host;
     }
 
+    /**
+     * Runs $fn after the response has been sent (PHP-FPM), or at the end of the request
+     * elsewhere. For slow work a visitor shouldn't wait for: emails, webhooks.
+     */
+    public static function afterResponse(callable $fn): void
+    {
+        if (PHP_SAPI === 'cli') {
+            $fn();
+            return;
+        }
+        register_shutdown_function(static function () use ($fn): void {
+            if (function_exists('fastcgi_finish_request')) {
+                @fastcgi_finish_request();
+            }
+            try {
+                $fn();
+            } catch (\Throwable $e) {
+                error_log('[kiosky-shepherd] after response: ' . $e->getMessage());
+            }
+        });
+    }
+
     /** Truncates a string to $max characters (multibyte-safe). */
     public static function clip(mixed $value, int $max): ?string
     {

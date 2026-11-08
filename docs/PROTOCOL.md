@@ -248,6 +248,12 @@ success.
   "allow_exit": false,
   "lockdown": false,
 
+  "playlist": {
+    "urls": ["https://ha.example.com/cameras", "https://calendar.example.com/"],
+    "seconds": 60,
+    "pause_on_touch_seconds": 120
+  },
+
   "screen": {
     "off_at": "22:00",
     "on_at": "07:00",
@@ -299,6 +305,7 @@ older apps. If a key is missing, use the default shown above.
 | `toolbar.pin` | `null`: no local unlock. Otherwise a technician can unlock the full toolbar (§5.3). |
 | `updates.*` | See §6. |
 | `checkin_seconds` | Interval of the check-in loop. |
+| `playlist.urls`, `playlist.seconds`, `playlist.pause_on_touch_seconds` | Page playlist. When `urls` isn't empty, show `url` and then each playlist page in turn, `seconds` each, looping. A touch pauses the rotation for `pause_on_touch_seconds` (0: never pause), then it carries on from the current page. Playlist hosts are always allowed, like the start page's. `go_home` and policy changes restart at `url`. Apps that don't support it ignore these keys. |
 | `screen.off_at`, `screen.on_at` | Screen schedule, in the tablet's local time (`HH:MM`, 24-hour). `off_at` empty: no schedule. Between `off_at` and `on_at` (wrapping past midnight when `on_at` is earlier) turn the screen off: clear `FLAG_KEEP_SCREEN_ON` and set the window's `screenBrightness` to 0 and show a black overlay, or call `DevicePolicyManager.lockNow()` when Kiosky is the device owner. At `on_at` restore brightness (and wake the screen with a `FULL_WAKE_LOCK`/`setTurnScreenOn` when it was locked), then reload the page. Report `screen_schedule: "off"` or `"on"` in `status`. Added in server 1.4.0; apps that don't support it ignore these keys. |
 | `screen.wake_on_touch`, `screen.wake_minutes` | While off for the schedule, a touch turns the screen on for `wake_minutes`, then it goes off again. The touch must not reach the page. |
 
@@ -394,6 +401,7 @@ it again.
 | `show_message` | `text`, `seconds` | Show `text` large and centred over the page for `seconds`, with a dismiss button |
 | `identify` | `seconds` | Show the device name and id full-screen for `seconds` |
 | `screenshot` | `max_width`, `quality` | Capture the WebView (`web.draw()` into a `Bitmap`), scale it to at most `max_width`, encode as JPEG at `quality`, and send it in the result |
+| `diagnostics` | `lines` | Collect recent troubleshooting data: the app's log (up to `lines` lines of its own logcat output), WebView console errors, the current policy version, device and app versions, storage and memory. Put it in a text file, gzip it (or zip several files), and send it as `"bundle": "<base64>"` in the result (at most 10 MB decoded). Don't include page content, cookies or the device token. |
 | `live_view` | `seconds`, `interval`, `max_width`, `quality` | Report `done` straight away, then for `seconds` capture a frame as for `screenshot` every `interval` seconds and `POST /api/v1/device/live` it (below). A newer `live_view` replaces a running one; `seconds: 0` stops it. Stop early on 4xx answers. Added in server 1.4.0. |
 
 Unknown command types must be reported as `failed` with message

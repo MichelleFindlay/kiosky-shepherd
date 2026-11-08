@@ -146,6 +146,8 @@ final class Devices
     {
         $names = array_column(Db::all('SELECT id, name FROM profiles'), 'name', 'id');
         foreach ($ids as $id) {
+            Events::emit('device.profile_changed', ['device' => Events::device(self::find($id) ?? ['id' => $id]),
+                'from' => $from === null ? null : ($names[$from] ?? null), 'to' => $names[$to] ?? null, 'by' => $by]);
             Db::insert('device_events', ['device_id' => $id, 'type' => 'profile_changed', 'data' => Db::json([
                 'from' => $from === null ? null : ($names[$from] ?? "#$from"),
                 'to' => $names[$to] ?? "#$to",
@@ -201,6 +203,57 @@ final class Devices
             }
         }
         return $n;
+    }
+
+    /** Problem keys, in the order they're shown, with the setting that switches each alert on. */
+    public const PROBLEMS = [
+        'offline' => 'Offline',
+        'policy' => 'Policy not applied',
+        'permission' => 'Missing "Display over other apps" permission',
+        'lockdown' => 'Lockdown can be escaped',
+        'page_error' => 'Page error',
+        'low_uptime' => 'Low uptime',
+        'low_battery' => 'Low battery',
+    ];
+
+    /**
+     * What's wrong with a device, as key => plain-language reason. $d is the output of
+     * present() plus uptime_7d. Used by the Overview and by alerts.
+     *
+     * @return array<string, string>
+     */
+    public static function problems(array $d, int $batteryBelow = 20): array
+    {
+        $out = [];
+        $state = is_array($d['state'] ?? null) ? $d['state'] : [];
+        if (!$d['online']) {
+            $out['offline'] = $d['last_seen_at'] === null ? 'never checked in' : 'offline';
+        } elseif (!$d['policy_current']) {
+            $out['policy'] = 'policy not applied yet';
+        }
+        if (($state['start_on_boot_permission'] ?? true) === false) {
+            $out['permission'] = 'missing "Display over other apps" permission';
+        }
+        if (($state['lockdown'] ?? false) === true) {
+            if (($state['lockdown_mode'] ?? null) === 'partial' && ($state['accessibility_helper'] ?? true) === false) {
+                $out['lockdown'] = 'lockdown can be escaped: accessibility helper is off';
+            } elseif (in_array($state['lockdown_mode'] ?? null, ['owner', 'mdm'], true) && ($state['lock_task'] ?? true) === false) {
+                $out['lockdown'] = 'lockdown on but not locked';
+            }
+        }
+        if (!empty($state['page_error'])) {
+            $out['page_error'] = 'page error';
+        }
+        // Only once a device has a day of history, so a new tablet isn't flagged for its first hours
+        $uptime = $d['uptime_7d'] ?? null;
+        if ($uptime !== null && $uptime < 90 && strtotime((string) $d['enrolled_at']) < time() - 86400) {
+            $out['low_uptime'] = "online only {$uptime}% in the last 7 days";
+        }
+        $battery = $state['battery_level'] ?? null;
+        if ($batteryBelow > 0 && is_int($battery) && $battery < $batteryBelow && ($state['charging'] ?? false) !== true && $d['online']) {
+            $out['low_battery'] = "battery at {$battery}% and not charging";
+        }
+        return $out;
     }
 
     /** Escapes a user string for use inside LIKE '%…%'. */
