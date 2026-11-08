@@ -1,0 +1,52 @@
+# Kiosky Shepherd: the whole project lives in the (sub)domain's public_html.
+# Only index.php and admin/ are meant to be reachable; everything else is denied.
+Options -Indexes
+# index.html is needed for the console at /admin/
+DirectoryIndex index.php index.html
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Keep the Authorization header for PHP (device and API-token auth)
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Block code, config, data and dotfiles (each folder also has its own deny .htaccess)
+    RewriteRule ^(src|config|storage|sql|bin|docs)(/|$) - [F,L]
+    RewriteRule (^|/)\.(?!well-known/) - [F,L]
+    RewriteRule \.(md|sql|log|dist|example\.php)$ - [F,L,NC]
+
+    # Serve the console's static files directly, send everything else to index.php
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [L]
+</IfModule>
+
+<FilesMatch "^(\.|.*\.(md|sql|log)$|LICENSE$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "no-referrer"
+    Header always set X-Frame-Options "DENY"
+    Header always set Strict-Transport-Security "max-age=31536000"
+    <FilesMatch "\.html$">
+        Header set Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        Header set Cache-Control "no-cache"
+    </FilesMatch>
+</IfModule>
+
+# Uploading APKs through the console. Some hosts ignore these here; if uploads
+# fail, set the same values in the control panel's PHP settings / .user.ini.
+<IfModule mod_php.c>
+    php_value upload_max_filesize 150M
+    php_value post_max_size 160M
+    php_flag display_errors off
+</IfModule>
