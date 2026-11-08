@@ -9,10 +9,29 @@ use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
 use Shepherd\SelfUpdate;
+use Shepherd\Settings;
 
-/** Updating Kiosky Shepherd itself from the console. Admins only. */
+/** Server settings and updating Kiosky Shepherd itself, from the console. Admins only. */
 final class SystemApi
 {
+    /** GET /api/v1/admin/system/settings  the settings the console may change, with config.php's values */
+    public static function settings(Request $req): Response
+    {
+        AdminAuth::require($req, 'admin');
+        return Response::json(Settings::describe());
+    }
+
+    /** PATCH /api/v1/admin/system/settings  {key: value} to change, {key: null} to go back to config.php */
+    public static function saveSettings(Request $req): Response
+    {
+        $p = AdminAuth::require($req, 'admin');
+        if ($p->type !== 'admin') {
+            throw HttpError::forbidden('Change server settings from the web console, not with an API token.');
+        }
+        $changed = Settings::save($req->json(), $p);
+        return Response::json(['changed' => $changed] + Settings::describe());
+    }
+
     /** GET /api/v1/admin/system/update  installed version, last check, what would stop an install, backups */
     public static function status(Request $req): Response
     {

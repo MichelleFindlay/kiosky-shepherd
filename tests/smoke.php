@@ -323,6 +323,24 @@ $ov = expect($admin, 200, 'GET', "$A/overview");
 check(($ov['alerts']['email'] ?? null) === 0 && ($ov['alerts']['webhooks'] ?? null) === [], 'overview shows alerts as off', $ov['alerts'] ?? null);
 expect($admin, 409, 'POST', "$A/alerts/test");
 
+// ---- Server settings (storage/settings.json over config.php) ----------------------
+$st = expect($admin, 200, 'GET', "$A/system/settings");
+$byKey = array_column($st['settings'], null, 'key');
+check(($byKey['retention_days']['value'] ?? null) === 90 && !$byKey['retention_days']['overridden'], 'settings show config.php values', $byKey['retention_days'] ?? null);
+check(!isset($byKey['db.password']) && !isset($byKey['self_update.repo']), 'secrets and the update source are not editable');
+expect($admin, 422, 'PATCH', "$A/system/settings", ['db.password' => 'x']);
+expect($admin, 422, 'PATCH', "$A/system/settings", ['retention_days' => 1]);
+expect($admin, 422, 'PATCH', "$A/system/settings", ['base_url' => 'http://insecure.example']);
+$sv = expect($admin, 200, 'PATCH', "$A/system/settings", ['retention_days' => 30,
+    'alerts.webhooks' => [['type' => 'json', 'url' => 'https://example.invalid/hook']]]);
+check(count($sv['changed']) === 2, 'settings are saved', $sv['changed']);
+$ov = expect($admin, 200, 'GET', "$A/overview");
+check($ov['alerts']['webhooks'] === ['json'], 'a saved setting takes effect straight away', $ov['alerts']);
+expect($admin, 200, 'PATCH', "$A/system/settings", ['retention_days' => null, 'alerts.webhooks' => null]);
+$st = expect($admin, 200, 'GET', "$A/system/settings");
+$byKey = array_column($st['settings'], null, 'key');
+check($byKey['retention_days']['value'] === 90 && !$byKey['retention_days']['overridden'], 'reset goes back to config.php');
+
 // ---- API tokens -------------------------------------------------------------------
 $t = expect($admin, 201, 'POST', "$A/tokens", ['name' => 'ci', 'role' => 'viewer', 'expires_days' => 1]);
 $api = new Client($base);
@@ -332,6 +350,7 @@ expect($api, 403, 'POST', "$A/profiles", ['name' => 'nope']);
 
 // ---- Self-update (no GitHub calls: the CI checkout is a git clone, which it refuses to overwrite)
 expect($api, 403, 'GET', "$A/system/update");
+expect($api, 403, 'GET', "$A/system/settings");
 $su = expect($admin, 200, 'GET', "$A/system/update");
 check($su['current'] === $h['version'] && is_array($su['problems']) && is_array($su['backups']), 'update status reports the installed version', $su);
 $inst = $admin->call('POST', "$A/system/update/install", ['version' => '99.0.0']);

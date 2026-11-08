@@ -335,6 +335,136 @@ async function viewServer() {
     if (state.server && st.check) state.server.update = { latest: st.check.latest, available: st.check.available };
   };
   render(await api.get('/admin/system/update'));
+  mainEl.append(serverSettingsCard());
+}
+
+// Server settings saved in storage/settings.json on top of config/config.php
+function serverSettingsCard() {
+  const card = h('div', { class: 'card stack-gap' }, h('h2', {}, 'Settings'));
+  const body = h('div', {});
+  card.append(body);
+  const show = (d) => {
+    clear(body);
+    body.append(h('p', { class: 'sub' }, 'Changes here are saved in storage/settings.json and take effect straight away, on top of config/config.php, '
+      + 'which is never rewritten. Reset goes back to the config.php value.'));
+    if (!d.writable) body.append(h('p', { class: 'error-text' }, 'PHP can\'t write to the storage folder, so settings can\'t be saved here.'));
+    const rows = [];
+    const groups = new Map();
+    for (const s of d.settings) {
+      if (!groups.has(s.group)) groups.set(s.group, h('div', { class: 'policy-group' }, h('h3', {}, s.group)));
+      const ctl = settingControl(s, d.webhook_types);
+      if (s.disabled_reason) ctl.disable();
+      const reset = s.overridden ? h('button', {
+        type: 'button', class: 'small',
+        onclick: () => save({ [s.key]: null }),
+      }, 'Reset') : null;
+      rows.push({ s, ctl });
+      groups.get(s.group).append(h('div', { class: 'policy-row' },
+        h('div', { class: 'meta' }, h('label', {}, s.label), s.help ? h('div', { class: 'help' }, s.help) : null,
+          h('div', { class: 'help mono' }, s.key)),
+        h('div', { class: 'control' }, ctl.el,
+          s.disabled_reason ? h('div', { class: 'inherit' }, s.disabled_reason)
+            : s.overridden ? h('div', { class: 'inherit' }, 'Set here. config.php: ', h('code', {}, settingText(s, s.file_value)), ' ', reset)
+              : h('div', { class: 'inherit' }, 'From config.php')))); 
+    }
+    const saveBtn = h('button', { class: 'primary', disabled: !d.writable }, 'Save settings');
+    saveBtn.addEventListener('click', () => {
+      const changes = {};
+      try {
+        for (const { s, ctl } of rows) {
+          if (s.disabled_reason) continue;
+          const v = ctl.get();
+          if (JSON.stringify(v) !== JSON.stringify(normaliseForCompare(s, s.value))) changes[s.key] = v;
+        }
+      } catch (ex) { fail(ex); return; }
+      if (!Object.keys(changes).length) { toast('Nothing changed.'); return; }
+      save(changes);
+    });
+    body.append(...groups.values(), h('div', { class: 'actions' }, saveBtn),
+      h('details', {}, h('summary', { class: 'sub' }, 'Only in config/config.php'),
+        h('p', { class: 'sub' }, 'For safety these can\'t be changed in the console: ', d.file_only.join(', '), '.')));
+  };
+  const save = async (changes) => {
+    try {
+      const r = await api.patch('/admin/system/settings', changes);
+      toast(r.changed.length ? `Saved ${r.changed.length} setting${r.changed.length === 1 ? '' : 's'}.` : 'Nothing changed.');
+      show(r);
+    } catch (ex) { fail(ex); }
+  };
+  api.get('/admin/system/settings').then(show).catch((ex) => body.append(h('div', { class: 'error-text' }, ex.message)));
+  return card;
+}
+
+function settingText(s, v) {
+  if (s.type === 'webhooks') return v.length ? v.map((w) => w.type).join(', ') : 'none';
+  return fmtValue(v);
+}
+
+function normaliseForCompare(s, v) {
+  if (s.type === 'webhooks') return (v || []).map((w) => ({ type: w.type, url: w.url }));
+  if (s.type === 'emails' || s.type === 'tags') return v || [];
+  // An unset text setting reads back as an empty field; don't count that as a change
+  if (v == null && ['string', 'url', 'email', 'timezone'].includes(s.type)) return '';
+  return v;
+}
+
+function settingControl(s, webhookTypes) {
+  let el;
+  let get;
+  const inputs = [];
+  switch (s.type) {
+    case 'bool':
+      el = h('input', { type: 'checkbox', checked: !!s.value });
+      inputs.push(el);
+      get = () => el.checked;
+      return { el: h('label', { class: 'check' }, el, 'On'), get, disable: () => { el.disabled = true; } };
+    case 'int':
+      el = h('input', { type: 'number', min: s.min, max: s.max, value: s.value ?? '' });
+      get = () => {
+        const n = parseInt(el.value, 10);
+        if (Number.isNaN(n)) throw new Error(`${s.label}: enter a number.`);
+        return n;
+      };
+      break;
+    case 'emails':
+      el = h('textarea', { placeholder: 'it@example.com' });
+      el.value = (s.value || []).join('\n');
+      get = () => el.value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+      break;
+    case 'tags':
+      el = h('input', { type: 'text', value: (s.value || []).join(', ') });
+      get = () => parseTags(el.value);
+      break;
+    case 'timezone': {
+      el = h('input', { type: 'text', value: s.value || '', list: 'settings-tz' });
+      let list = null;
+      try { list = h('datalist', { id: 'settings-tz' }, Intl.supportedValuesOf('timeZone').map((z) => h('option', { value: z }))); } catch (e) { /* free text */ }
+      get = () => el.value.trim();
+      return { el: h('div', {}, el, list), get, disable: () => { el.disabled = true; } };
+    }
+    case 'webhooks': {
+      const list = h('div', { class: 'webhooks' });
+      const hooks = [];
+      const addRow = (w) => {
+        const type = h('select', {}, webhookTypes.map((t) => h('option', { value: t, selected: t === w.type }, t)));
+        const url = h('input', { type: 'url', value: w.url || '', placeholder: 'https://…' });
+        const row = h('div', { class: 'webhook-row' }, type, url,
+          w.has_headers ? h('span', { class: 'chip', title: 'Extra headers from config.php are kept while the address is unchanged' }, 'headers') : null);
+        const entry = { type, url, row };
+        row.append(h('button', { type: 'button', class: 'small', onclick: () => { hooks.splice(hooks.indexOf(entry), 1); row.remove(); } }, 'Remove'));
+        hooks.push(entry);
+        list.append(row);
+      };
+      (s.value || []).forEach(addRow);
+      const add = h('button', { type: 'button', class: 'small', onclick: () => addRow({ type: 'slack', url: '' }) }, 'Add webhook');
+      get = () => hooks.filter((x) => x.url.value.trim()).map((x) => ({ type: x.type.value, url: x.url.value.trim() }));
+      return { el: h('div', {}, list, add), get, disable: () => { add.disabled = true; } };
+    }
+    default:
+      el = h('input', { type: s.type === 'url' ? 'url' : s.type === 'email' ? 'email' : 'text', value: s.value ?? '' });
+      get = () => el.value.trim();
+  }
+  return { el, get, disable: () => { el.disabled = true; } };
 }
 
 function migrationBanner() {

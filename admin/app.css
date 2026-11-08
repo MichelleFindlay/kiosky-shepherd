@@ -345,3 +345,8 @@ button:disabled { opacity: .5; cursor: default; }
 
 .release-notes { white-space: pre-wrap; font-family: inherit; background: var(--surface-2); border: 1px solid var(--line);
   border-radius: 7px; padding: .75rem; max-height: 22rem; overflow: auto; margin: 0 0 .75rem; }
+
+/* Server settings: webhook rows */
+.webhooks { display: flex; flex-direction: column; gap: .4rem; margin-bottom: .4rem; }
+.webhook-row { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+.webhook-row input { flex: 1 1 14rem; min-width: 0; }

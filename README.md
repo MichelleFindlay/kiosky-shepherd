@@ -288,6 +288,24 @@ release is targeted at. When it looks good, move the profiles over and remove th
 ring. A device's own `updates.release` override still wins, and a device in
 several rings follows the newest release.
 
+## Server settings in the console
+
+**Server → Settings** lets admins change everyday settings without editing files:
+organisation, server address, time zone, automatic database updates, session idle
+time, command and check-in timings, upload limits, retention, offline alerts
+(emails, webhooks, ignored tags, threshold) and automatic Kiosky Shepherd updates.
+
+They're saved in `storage/settings.json` and applied on top of
+`config/config.php`, which is never rewritten. Each setting shows its config.php
+value and has **Reset**. Changes take effect on the next request and are recorded
+in the audit log.
+
+For safety, these stay in config.php only: the database, single sign-on, `setup_key`,
+password sign-in, trusted proxies, session cookie settings, the storage folder, the
+Kiosky package name, and where updates come from (and whether the console may
+install them). Webhooks that need extra headers are also set in config.php; the
+console keeps their headers as long as the address isn't changed.
+
 ## Updating from the console
 
 Cron checks GitHub for a newer Kiosky Shepherd every 6 hours, and admins then see
@@ -560,6 +578,7 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `GET /api/v1/admin/login-options` | none | Whether password sign-in is on, and the single sign-on providers |
 | `POST /api/v1/admin/migrate` | admin | Apply pending database migrations; `GET …/session` lists them under `server.pending_migrations` |
 | `POST /api/v1/admin/alerts/test` | admin | Send a test message to every alert channel |
+| `GET/PATCH /api/v1/admin/system/settings` | admin | Console-editable settings with their config.php values; `PATCH {key: value \| null}` (null resets) |
 | `GET /api/v1/admin/system/update` | admin | Installed version, last update check, what would stop an install, backups |
 | `POST /api/v1/admin/system/update/check` | admin | Check GitHub now |
 | `POST /api/v1/admin/system/update/install` | admin | `{version}`: install the newest release (must match the last check) |

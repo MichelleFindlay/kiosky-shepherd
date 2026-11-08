@@ -40,6 +40,9 @@ final class Config
     /** @var array<string, mixed> */
     private static array $values = self::DEFAULTS;
 
+    /** @var array<string, mixed> config.php merged with the defaults, before console settings */
+    private static array $fileValues = self::DEFAULTS;
+
     public static function load(string $file): void
     {
         if (!is_file($file)) {
@@ -53,12 +56,33 @@ final class Config
         if (empty(self::$values['storage_dir'])) {
             self::$values['storage_dir'] = SHEPHERD_ROOT . '/storage';
         }
+        self::$fileValues = self::$values;
+        // Settings changed in the console (Server → Settings) beat config.php
+        Settings::applyStored();
     }
 
-    /** Reads a value by dotted path, e.g. Config::get('db.dsn'). */
-    public static function get(string $path, mixed $default = null): mixed
+    /** A value as config.php (or the built-in default) sets it, ignoring console settings. */
+    public static function fileValue(string $path, mixed $default = null): mixed
     {
-        $node = self::$values;
+        return self::lookup(self::$fileValues, $path, $default);
+    }
+
+    /** Replaces one value for the rest of the request (used by Settings). */
+    public static function set(string $path, mixed $value): void
+    {
+        $ref = &self::$values;
+        foreach (explode('.', $path) as $part) {
+            if (!isset($ref[$part]) || !is_array($ref[$part])) {
+                $ref[$part] = [];
+            }
+            $ref = &$ref[$part];
+        }
+        $ref = $value;
+        unset($ref);
+    }
+
+    private static function lookup(array $node, string $path, mixed $default): mixed
+    {
         foreach (explode('.', $path) as $part) {
             if (!is_array($node) || !array_key_exists($part, $node)) {
                 return $default;
@@ -66,6 +90,12 @@ final class Config
             $node = $node[$part];
         }
         return $node;
+    }
+
+    /** Reads a value by dotted path, e.g. Config::get('db.dsn'). */
+    public static function get(string $path, mixed $default = null): mixed
+    {
+        return self::lookup(self::$values, $path, $default);
     }
 
     public static function storage(string $sub = ''): string
