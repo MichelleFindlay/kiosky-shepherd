@@ -42,6 +42,16 @@ if (\Shepherd\Migrator::tableExists('scheduled_commands')) {
     $extra[] = 'database update pending: schedules and alerts are off';
 }
 
+// Keeps Cloudflare's address ranges current when trusted_proxies includes 'cloudflare'
+try {
+    $cf = \Shepherd\Http\TrustedProxies::refreshCloudflare();
+    if (str_contains($cf, 'updated')) {
+        $extra[] = $cf;
+    }
+} catch (\Throwable $e) {
+    error_log('[kiosky-shepherd] cron cloudflare ranges: ' . $e->getMessage());
+}
+
 // Checks GitHub for a newer Kiosky Shepherd every 6 hours (and installs it when self_update.auto is on)
 try {
     $extra[] = \Shepherd\SelfUpdate::cron();

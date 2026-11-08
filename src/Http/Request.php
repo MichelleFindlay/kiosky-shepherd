@@ -13,6 +13,8 @@ final class Request
 
     private ?array $jsonBody = null;
 
+    private ?string $clientIp = null;
+
     /**
      * @param array<string, string> $headers lower-cased names
      * @param array<string, mixed> $query
@@ -135,23 +137,13 @@ final class Request
         return in_array($this->method, ['GET', 'HEAD', 'OPTIONS'], true);
     }
 
-    /** Client IP, honouring X-Forwarded-For only from configured proxies. */
+    /**
+     * Client IP. Behind a trusted reverse proxy or CDN (trusted_proxies) it comes from the
+     * forwarding headers; see TrustedProxies.
+     */
     public function ip(): string
     {
-        $trusted = (array) Config::get('trusted_proxies', []);
-        if ($trusted !== [] && in_array($this->remoteAddr, $trusted, true)) {
-            $fwd = $this->header('x-forwarded-for');
-            if ($fwd !== null) {
-                $parts = array_map('trim', explode(',', $fwd));
-                // Walk from the right, skipping our own proxies
-                for ($i = count($parts) - 1; $i >= 0; $i--) {
-                    if (!in_array($parts[$i], $trusted, true) && filter_var($parts[$i], FILTER_VALIDATE_IP)) {
-                        return $parts[$i];
-                    }
-                }
-            }
-        }
-        return $this->remoteAddr;
+        return $this->clientIp ??= TrustedProxies::clientIp($this->remoteAddr, fn (string $h) => $this->header($h));
     }
 
     public function isHttps(): bool
@@ -159,8 +151,6 @@ final class Request
         if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
             return true;
         }
-        $trusted = (array) Config::get('trusted_proxies', []);
-        return in_array($this->remoteAddr, $trusted, true)
-            && strtolower((string) $this->header('x-forwarded-proto')) === 'https';
+        return TrustedProxies::forwardedHttps($this->remoteAddr, fn (string $h) => $this->header($h));
     }
 }

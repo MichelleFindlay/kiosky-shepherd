@@ -32,10 +32,11 @@ final class Client
     }
 
     /** @return array{status: int, body: mixed, raw: string, headers: array<string, string>} */
-    public function call(string $method, string $path, mixed $body = null): array
+    /** @param list<string> $extra raw header lines, e.g. "X-Forwarded-For: 203.0.113.9" */
+    public function call(string $method, string $path, mixed $body = null, array $extra = []): array
     {
         $ch = curl_init($this->base . $path);
-        $headers = ['Accept: application/json'];
+        $headers = array_merge(['Accept: application/json'], $extra);
         if ($this->cookies !== []) {
             $headers[] = 'Cookie: ' . implode('; ', array_map(static fn ($k, $v) => "$k=$v", array_keys($this->cookies), $this->cookies));
         }
@@ -323,14 +324,34 @@ $ov = expect($admin, 200, 'GET', "$A/overview");
 check(($ov['alerts']['email'] ?? null) === 0 && ($ov['alerts']['webhooks'] ?? null) === [], 'overview shows alerts as off', $ov['alerts'] ?? null);
 expect($admin, 409, 'POST', "$A/alerts/test");
 
+// ---- Reverse proxies (CI trusts 'private' and 'cloudflare'; requests come from 127.0.0.1)
+$net = function (array $headers) use ($admin, $A): array {
+    $r = $admin->call('GET', "$A/system/network", null, $headers);
+    check($r['status'] === 200, 'network diagnostics answer', $r['body']);
+    return $r['body'];
+};
+$n = $net(['X-Forwarded-For: 203.0.113.9, 10.0.0.2', 'X-Forwarded-Proto: https']);
+check($n['client_ip'] === '203.0.113.9' && $n['https'] === true && $n['remote_trusted'], 'X-Forwarded-For through two trusted hops', $n);
+$n = $net(['X-Forwarded-For: 203.0.113.9, 104.16.0.1']);
+check($n['client_ip'] === '203.0.113.9', 'a Cloudflare hop in the chain is skipped', $n);
+$n = $net(['CF-Connecting-IP: 198.51.100.7']);
+check($n['client_ip'] === '127.0.0.1', 'CF-Connecting-IP is ignored unless Cloudflare itself connects', $n);
+$n = $net(['Forwarded: for="[2001:db8::5]:443";proto=https']);
+check($n['client_ip'] === '2001:db8::5' && $n['https'] === true, 'the standard Forwarded header works', $n);
+$n = $net(['X-Forwarded-For: not-an-ip']);
+check($n['client_ip'] === '127.0.0.1', 'a malformed chain falls back to the connecting address', $n);
+$n = $net(['CF-Visitor: {"scheme":"https"}', 'CF-Ray: abc']);
+check($n['https'] === true && $n['via'] === 'cloudflare', 'Cloudflare\'s CF-Visitor marks HTTPS', $n);
+
 // ---- Server settings (storage/settings.json over config.php) ----------------------
 $st = expect($admin, 200, 'GET', "$A/system/settings");
 $byKey = array_column($st['settings'], null, 'key');
 check(($byKey['retention_days']['value'] ?? null) === 90 && !$byKey['retention_days']['overridden'], 'settings show config.php values', $byKey['retention_days'] ?? null);
-check(!isset($byKey['db.password']) && !isset($byKey['self_update.repo']), 'secrets and the update source are not editable');
+check(!isset($byKey['db.password']) && !isset($byKey['self_update.repo']) && !isset($byKey['base_url']), 'secrets and the update source are not editable');
 expect($admin, 422, 'PATCH', "$A/system/settings", ['db.password' => 'x']);
 expect($admin, 422, 'PATCH', "$A/system/settings", ['retention_days' => 1]);
-expect($admin, 422, 'PATCH', "$A/system/settings", ['base_url' => 'http://insecure.example']);
+expect($admin, 422, 'PATCH', "$A/system/settings", ['base_url' => 'https://elsewhere.example']);
+expect($admin, 422, 'PATCH', "$A/system/settings", ['fast_checkin_seconds' => 10]);
 $sv = expect($admin, 200, 'PATCH', "$A/system/settings", ['retention_days' => 30,
     'alerts.webhooks' => [['type' => 'json', 'url' => 'https://example.invalid/hook']]]);
 check(count($sv['changed']) === 2, 'settings are saved', $sv['changed']);
@@ -351,6 +372,7 @@ expect($api, 403, 'POST', "$A/profiles", ['name' => 'nope']);
 // ---- Self-update (no GitHub calls: the CI checkout is a git clone, which it refuses to overwrite)
 expect($api, 403, 'GET', "$A/system/update");
 expect($api, 403, 'GET', "$A/system/settings");
+expect($api, 403, 'GET', "$A/system/network");
 $su = expect($admin, 200, 'GET', "$A/system/update");
 check($su['current'] === $h['version'] && is_array($su['problems']) && is_array($su['backups']), 'update status reports the installed version', $su);
 $inst = $admin->call('POST', "$A/system/update/install", ['version' => '99.0.0']);

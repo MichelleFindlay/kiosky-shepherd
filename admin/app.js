@@ -335,7 +335,32 @@ async function viewServer() {
     if (state.server && st.check) state.server.update = { latest: st.check.latest, available: st.check.available };
   };
   render(await api.get('/admin/system/update'));
-  mainEl.append(serverSettingsCard());
+  mainEl.append(serverSettingsCard(), networkCard());
+}
+
+// How requests reach the server: reverse proxy / CDN (Cloudflare…) diagnostics
+function networkCard() {
+  const card = h('div', { class: 'card stack-gap' }, h('h2', {}, 'Network'));
+  api.get('/admin/system/network').then((n) => {
+    const ROUTES = { direct: 'Directly', cloudflare: 'Through Cloudflare', proxy: 'Through a trusted proxy', 'untrusted proxy': 'Through a proxy that isn\'t trusted' };
+    card.append(
+      h('p', { class: 'sub' }, 'What the server sees for your own request. Behind Cloudflare or another reverse proxy, list it under ',
+        h('code', {}, 'trusted_proxies'), ' in config/config.php so visitors\' real addresses are used for rate limits, the audit log and device IPs.'),
+      n.warnings.length ? h('ul', { class: 'warnings' }, n.warnings.map((w) => h('li', {}, h('span', { class: 'chip warn' }, 'Check'), ' ', w))) : null,
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'Your address'), h('dd', {}, h('code', {}, n.client_ip)),
+        h('dt', {}, 'Arrived'), h('dd', {}, ROUTES[n.via] || n.via, n.remote_addr !== n.client_ip ? h('span', { class: 'sub' }, ` from ${n.remote_addr}`) : null),
+        h('dt', {}, 'HTTPS'), h('dd', {}, n.https ? h('span', { class: 'chip ok' }, 'Yes') : h('span', { class: 'chip bad' }, 'No')),
+        h('dt', {}, 'trusted_proxies'), h('dd', {}, n.trusted_proxies.length
+          ? [h('code', {}, n.trusted_proxies.join(', ')), h('span', { class: 'sub' }, ` (${n.ranges} range${n.ranges === 1 ? '' : 's'})`)]
+          : 'none (visitors connect directly)'),
+        h('dt', {}, 'Client IP header'), h('dd', {}, h('code', {}, n.client_ip_header)),
+        n.trusted_proxies.some((t) => t.toLowerCase() === 'cloudflare') ? [h('dt', {}, 'Cloudflare ranges'),
+          h('dd', {}, `${n.cloudflare.count}, ${n.cloudflare.source === 'built-in' ? 'built in' : `downloaded ${new Date(n.cloudflare.updated_at).toLocaleDateString()}`}`)] : null),
+      Object.keys(n.headers).length ? h('details', {}, h('summary', { class: 'sub' }, 'Forwarding headers on this request'),
+        h('dl', { class: 'kv' }, Object.entries(n.headers).map(([k, v]) => [h('dt', {}, h('code', {}, k)), h('dd', { class: 'mono' }, v)]))) : null);
+  }).catch((ex) => card.append(h('div', { class: 'error-text' }, ex.message)));
+  return card;
 }
 
 // Server settings saved in storage/settings.json on top of config/config.php

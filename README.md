@@ -119,8 +119,50 @@ server {
 }
 ```
 
-Behind a reverse proxy or load balancer, list its address in `trusted_proxies`
-so the server sees client IPs and HTTPS correctly.
+Behind a reverse proxy, load balancer or CDN, see
+[Reverse proxies and Cloudflare](#reverse-proxies-and-cloudflare).
+
+## Reverse proxies and Cloudflare
+
+When something sits in front of Kiosky Shepherd (Cloudflare, nginx, Caddy, Traefik,
+HAProxy, a cloud load balancer…), PHP sees the proxy's address instead of the
+visitor's, and may think HTTPS is plain HTTP. Tell it which proxies to believe in
+`config/config.php`:
+
+```php
+'trusted_proxies' => ['cloudflare'],            // Cloudflare straight to this server
+'trusted_proxies' => ['cloudflare', 'private'], // Cloudflare → nginx on this machine → PHP
+'trusted_proxies' => ['private'],               // nginx / Caddy / Traefik / Docker in front
+'trusted_proxies' => ['10.0.0.5', '192.0.2.0/24', '2001:db8::/48'], // your own load balancers
+```
+
+Entries are single IPs, CIDR ranges (IPv4 or IPv6), or the presets `cloudflare`
+(Cloudflare's published ranges, built in and refreshed weekly by cron) and
+`private` (loopback, private and link-local networks). Forwarding headers are
+ignored from anyone else, so they can't be faked.
+
+The visitor's address comes from `CF-Connecting-IP` when Cloudflare connects
+directly, otherwise from the standard `Forwarded` or `X-Forwarded-For` chain
+(skipping every trusted hop, so chains like Cloudflare → nginx work), then
+`X-Real-IP`. Set `client_ip_header` to force one: `true-client-ip` (Akamai,
+Cloudflare Enterprise), `fastly-client-ip`, `x-azure-clientip`, `x-real-ip`,
+`x-forwarded-for`, `forwarded` or `cf-connecting-ip`. HTTPS is recognised from
+`X-Forwarded-Proto`, `Forwarded: proto=`, Cloudflare's `CF-Visitor` and
+`X-Forwarded-Ssl`.
+
+**Server → Network** in the console shows the address and HTTPS state the server
+sees for you, and warns when a proxy is in front but not trusted (then every
+visitor looks like the proxy: rate limits, the audit log and device IPs are wrong).
+
+With Cloudflare, also:
+
+- use SSL/TLS mode **Full (strict)** with a valid certificate on the server;
+- turn off **Rocket Loader** and **Email Address Obfuscation** for the site: they
+  inject scripts that the console's security policy blocks;
+- set **Browser Cache TTL** to "Respect Existing Headers", and don't add cache rules
+  for `/api/` (responses are `no-store`) or `/admin/` (`no-cache`).
+- Tablets work through Cloudflare unchanged; if Bot Fight Mode or a WAF rule
+  challenges them, skip it for `/api/v1/device/`.
 
 ### Upgrading
 
@@ -138,6 +180,11 @@ an **Update database** banner in the console; click it. With SSH you can run
 `php bin/migrate.php` instead, or import the new files from `sql/migrations/` in
 phpMyAdmin. The banner also appears if an automatic update fails; the reason is in
 the PHP error log, and it isn't retried automatically until you upload new files.
+
+**1.6.0** adds **Server → Settings** (see [Server settings in the console](#server-settings-in-the-console)).
+There is no database change. PHP needs write access to `storage/` to save settings there.
+It also adds CIDR ranges and the `cloudflare` / `private` presets to `trusted_proxies`,
+`client_ip_header`, and **Server → Network** (see [Reverse proxies and Cloudflare](#reverse-proxies-and-cloudflare)).
 
 **1.5.0** adds `sql/migrations/005_release_channels.sql` (applied automatically)
 and the **Release channel** policy setting, so device policies change once more.
@@ -291,7 +338,7 @@ several rings follows the newest release.
 ## Server settings in the console
 
 **Server → Settings** lets admins change everyday settings without editing files:
-organisation, server address, time zone, automatic database updates, session idle
+organisation, time zone, automatic database updates, session idle
 time, command and check-in timings, upload limits, retention, offline alerts
 (emails, webhooks, ignored tags, threshold) and automatic Kiosky Shepherd updates.
 
@@ -300,7 +347,9 @@ They're saved in `storage/settings.json` and applied on top of
 value and has **Reset**. Changes take effect on the next request and are recorded
 in the audit log.
 
-For safety, these stay in config.php only: the database, single sign-on, `setup_key`,
+For safety, these stay in config.php only: the server address (`base_url`: single
+sign-on callbacks are built from it, and enrolled tablets keep the address they
+enrolled with), the database, single sign-on, `setup_key`,
 password sign-in, trusted proxies, session cookie settings, the storage folder, the
 Kiosky package name, and where updates come from (and whether the console may
 install them). Webhooks that need extra headers are also set in config.php; the
@@ -578,6 +627,7 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `GET /api/v1/admin/login-options` | none | Whether password sign-in is on, and the single sign-on providers |
 | `POST /api/v1/admin/migrate` | admin | Apply pending database migrations; `GET …/session` lists them under `server.pending_migrations` |
 | `POST /api/v1/admin/alerts/test` | admin | Send a test message to every alert channel |
+| `GET /api/v1/admin/system/network` | admin | How your request reached the server: client IP, HTTPS, proxy headers, warnings |
 | `GET/PATCH /api/v1/admin/system/settings` | admin | Console-editable settings with their config.php values; `PATCH {key: value \| null}` (null resets) |
 | `GET /api/v1/admin/system/update` | admin | Installed version, last update check, what would stop an install, backups |
 | `POST /api/v1/admin/system/update/check` | admin | Check GitHub now |
@@ -601,6 +651,8 @@ The device API (`/api/v1/device/…`) is documented in [docs/PROTOCOL.md](docs/P
   (SHA-256 for random tokens, bcrypt/argon via `password_hash` for passwords).
 - The console uses a `SameSite=Strict`, `HttpOnly`, `Secure` session cookie, plus
   a CSRF token on every change. Its CSP allows only same-origin scripts and styles.
+- Forwarding headers (client IP, HTTPS) are only believed from `trusted_proxies`,
+  which can only be set in config.php.
 - Logins, two-factor codes, enrollment and first-run setup are rate-limited per IP
   (and per user). Each device is limited to 120 check-ins and 300 command results
   per 10 minutes and 30 APK downloads an hour.

@@ -235,8 +235,9 @@ final class DevicesApi
 
     public static function fastSeconds(): int
     {
-        // At least 10 s, so a watched device stays well inside the check-in rate limit
-        return max(10, min(60, (int) Config::get('fast_checkin_seconds', 15)));
+        // At least 15 s: Kiosky won't check in more often, and it keeps a watched device
+        // well inside the check-in rate limit
+        return max(15, min(60, (int) Config::get('fast_checkin_seconds', 15)));
     }
 
     /** DELETE /api/v1/admin/devices/{id}  retires; ?purge=1 on a retired device deletes it */

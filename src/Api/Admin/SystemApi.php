@@ -8,6 +8,7 @@ use Shepherd\Auth\AdminAuth;
 use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
+use Shepherd\Http\TrustedProxies;
 use Shepherd\SelfUpdate;
 use Shepherd\Settings;
 
@@ -30,6 +31,13 @@ final class SystemApi
         }
         $changed = Settings::save($req->json(), $p);
         return Response::json(['changed' => $changed] + Settings::describe());
+    }
+
+    /** GET /api/v1/admin/system/network  how this request reached the server (reverse proxy / CDN diagnostics) */
+    public static function network(Request $req): Response
+    {
+        AdminAuth::require($req, 'admin');
+        return Response::json(TrustedProxies::diagnose($req));
     }
 
     /** GET /api/v1/admin/system/update  installed version, last check, what would stop an install, backups */

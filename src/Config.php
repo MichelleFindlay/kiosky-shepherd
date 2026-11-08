@@ -15,6 +15,7 @@ final class Config
         'base_url' => '',
         'storage_dir' => null,
         'trusted_proxies' => [],
+        'client_ip_header' => 'auto',
         'session_name' => 'shepherd_sid',
         'session_lifetime' => 43200,
         'cookie_secure' => true,

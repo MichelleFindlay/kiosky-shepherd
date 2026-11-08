@@ -26,9 +26,23 @@ return [
     // lets you, a folder outside public_html is safer, e.g. '/home/you/kiosky-storage'.
     // 'storage_dir' => '/home/you/kiosky-storage',
 
-    // IPs of reverse proxies / load balancers whose X-Forwarded-For and
-    // X-Forwarded-Proto headers should be trusted.
+    // Reverse proxies, load balancers and CDNs in front of this server, whose
+    // forwarding headers (client IP, HTTPS) are believed. Single IPs, CIDR ranges and
+    // two presets: 'cloudflare' (Cloudflare's ranges, kept current by cron) and
+    // 'private' (loopback and private networks: nginx/Caddy/Traefik on the same
+    // machine, in Docker or on the LAN). Leave empty when visitors connect directly.
+    // Server → Network in the console shows what the server sees and warns if this
+    // looks wrong. Examples:
+    //   ['cloudflare']                     Cloudflare straight to this server
+    //   ['cloudflare', 'private']          Cloudflare → nginx on this machine → PHP
+    //   ['10.0.0.5', '192.0.2.0/24']       your own load balancers
     'trusted_proxies' => [],
+
+    // Which header holds the visitor's IP. 'auto' uses CF-Connecting-IP from
+    // Cloudflare, then Forwarded / X-Forwarded-For / X-Real-IP. Or force one of:
+    // 'x-forwarded-for', 'forwarded', 'cf-connecting-ip', 'true-client-ip' (Akamai,
+    // Cloudflare Enterprise), 'x-real-ip', 'fastly-client-ip', 'x-azure-clientip'.
+    'client_ip_header' => 'auto',
 
     // ---- Single sign-on (optional) -------------------------------------------
     // Console users can sign in with Microsoft Entra ID or any OpenID Connect
@@ -101,7 +115,7 @@ return [
     // Default time zone for new scheduled commands, e.g. 'Europe/London'
     'timezone' => 'UTC',
 
-    // While someone has a device's page open, it is asked to check in this often (10–60 s)
+    // While someone has a device's page open, it is asked to check in this often (15–60 s)
     'fast_checkin_seconds' => 15,
 
     // ---- Updating Kiosky Shepherd from the console ---------------------------

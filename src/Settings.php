@@ -13,10 +13,12 @@ use Shepherd\Http\HttpError;
  * is never rewritten: it holds secrets and PHP code, and a bad write there would
  * take the whole site (and this page) down.
  *
- * Only the settings below can be changed here. Database, single sign-on, setup key,
- * trusted proxies, cookies, password sign-in and where self-updates come from stay
- * in config.php, so a stolen admin login can't use them to lock people out, weaken
- * security or point updates at someone else's code.
+ * Only the settings below can be changed here. Server address, database, single
+ * sign-on, setup key, trusted proxies, cookies, password sign-in and where
+ * self-updates come from stay in config.php, so a stolen admin login can't use
+ * them to lock people out, weaken security or point updates at someone else's
+ * code. The server address is one of them because single sign-on callbacks are built from it (a wrong value breaks SSO
+ * sign-in) and enrolled tablets keep the address they enrolled with anyway.
  */
 final class Settings
 {
@@ -26,8 +28,6 @@ final class Settings
         // --- General -----------------------------------------------------------
         'organisation' => ['type' => 'string', 'max' => 100, 'group' => 'General', 'label' => 'Organisation',
             'help' => 'Shown on managed tablets ("Managed by …"). Changing it changes every device\'s policy once.'],
-        'base_url' => ['type' => 'url', 'group' => 'General', 'label' => 'Server address',
-            'help' => 'The public https:// address, without a trailing slash. Used in enrollment QR codes and update downloads, so a wrong value stops tablets updating.'],
         'timezone' => ['type' => 'timezone', 'group' => 'General', 'label' => 'Time zone',
             'help' => 'Default for new schedules, and the day boundaries of health history.'],
         'auto_migrate' => ['type' => 'bool', 'group' => 'General', 'label' => 'Apply database updates automatically',
@@ -36,8 +36,8 @@ final class Settings
             'label' => 'Sign out after being idle for (seconds)', 'help' => '43200 is 12 hours.'],
 
         // --- Devices and commands ------------------------------------------------
-        'fast_checkin_seconds' => ['type' => 'int', 'min' => 10, 'max' => 60, 'group' => 'Devices and commands',
-            'label' => 'Check-in interval while a device page is open (seconds)', 'help' => ''],
+        'fast_checkin_seconds' => ['type' => 'int', 'min' => 15, 'max' => 60, 'group' => 'Devices and commands',
+            'label' => 'Check-in interval while a device page is open (seconds)', 'help' => 'Kiosky never checks in more often than every 15 seconds.'],
         'command_ttl_hours' => ['type' => 'int', 'min' => 1, 'max' => 720, 'group' => 'Devices and commands',
             'label' => 'Queued commands expire after (hours)', 'help' => ''],
         'command_redeliver_seconds' => ['type' => 'int', 'min' => 60, 'max' => 3600, 'group' => 'Devices and commands',
@@ -70,7 +70,7 @@ final class Settings
 
     /** Shown on the page, so admins know where the rest lives. */
     public const FILE_ONLY = [
-        'Database connection', 'Single sign-on providers and secrets', 'setup_key', 'Password sign-in on/off',
+        'Server address (base_url)', 'Database connection', 'Single sign-on providers and secrets', 'setup_key', 'Password sign-in on/off',
         'Trusted proxies', 'Session cookie settings', 'Storage folder', 'Kiosky package name',
         'Where updates come from, and whether the console may install them',
     ];
@@ -220,12 +220,6 @@ final class Settings
                 $v = is_string($v) ? trim($v) : '';
                 if ($v === '' || mb_strlen($v) > $def['max'] || preg_match('/[\x00-\x1F\x7F]/', $v)) {
                     $err = "Enter up to {$def['max']} characters.";
-                }
-                return $v;
-            case 'url':
-                $v = is_string($v) ? rtrim(trim($v), '/') : '';
-                if (!preg_match('#^https://[^/\s?#]+(/[^\s?#]*)?$#i', $v) || filter_var($v, FILTER_VALIDATE_URL) === false) {
-                    $err = 'Use the https:// address of this server, e.g. https://kiosks.example.com.';
                 }
                 return $v;
             case 'timezone':
