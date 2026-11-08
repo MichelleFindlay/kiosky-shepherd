@@ -166,7 +166,7 @@ function renderShell() {
   mainEl = h('main', { id: 'main' });
   app.append(h('div', { class: 'shell' },
     h('aside', { class: 'side' },
-      h('div', { class: 'brand' }, h('span', { class: 'brand-mark' }, 'K'), 'Shepherd'),
+      h('div', { class: 'brand' }, h('img', { class: 'brand-mark', src: 'img/logo-128.png', alt: '' }), 'Shepherd'),
       nav,
       h('div', { class: 'side-foot' },
         h('div', {}, h('a', { href: '#/account' }, state.me.username), ' · ', state.me.role),
@@ -218,13 +218,17 @@ async function renderLogin() {
   field('Username', user), field('Password', pass), err,
   h('button', { class: 'primary', type: 'submit' }, 'Sign in'));
   clear(document.getElementById('app')).append(h('div', { class: 'login' },
-    h('div', { class: 'card' }, h('h1', {}, 'Kiosky Shepherd'), h('p', { class: 'sub' }, 'Sign in to manage your kiosks.'),
+    h('div', { class: 'card' }, logo(), h('h1', {}, 'Kiosky Shepherd'), h('p', { class: 'sub' }, 'Sign in to manage your kiosks.'),
       setupError ? h('p', { class: 'error-text' }, setupError) : null, form)));
   user.focus();
 }
 
+function logo() {
+  return h('img', { class: 'login-logo', src: 'img/logo-256.png', alt: 'Kiosky Shepherd logo', width: 112, height: 112 });
+}
+
 function renderSetup(enabled, install) {
-  const box = h('div', { class: 'card' }, h('h1', {}, 'Set up Kiosky Shepherd'));
+  const box = h('div', { class: 'card' }, logo(), h('h1', {}, 'Set up Kiosky Shepherd'));
   if (!enabled) {
     box.append(h('p', {}, 'There are no console users yet. Either run ', h('code', {}, 'php bin/create-admin.php <name>'),
       ' on the server, or put a long random ', h('code', {}, 'setup_key'), ' in config/config.php and reload this page.'));

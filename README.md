@@ -1,3 +1,5 @@
+<p align="center"><img src="admin/img/logo-256.png" alt="Kiosky Shepherd logo" width="160" height="160"></p>
+
 # Kiosky Shepherd
 
 A management server for [Kiosky](https://github.com/MichelleFindlay/kiosky) wall
