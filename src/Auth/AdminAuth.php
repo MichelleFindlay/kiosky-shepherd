@@ -14,6 +14,7 @@ use Shepherd\Http\Request;
  *  - Session cookie (the web console). State-changing requests must send the
  *    session's CSRF token in an X-CSRF-Token header.
  *  - API token: "Authorization: Bearer shp_…" for scripts and integrations.
+ * Console sessions are started by a password (login) or by single sign-on (Sso).
  */
 final class AdminAuth
 {
@@ -118,25 +119,47 @@ final class AdminAuth
         $admin = Db::one('SELECT id, username, password_hash, role, disabled FROM admins WHERE username = :u',
             ['u' => $username]);
 
-        // Verify against a dummy hash when the user doesn't exist, so timing doesn't leak usernames
-        $hash = $admin['password_hash'] ?? '$2y$10$abcdefghijklmnopqrstuuJ0f2Cq3tVZXKJ3Qb8rWm6cE6Yd0r9sW';
-        $ok = password_verify($password, $hash);
-        if ($admin === null || !$ok || (int) $admin['disabled'] === 1) {
+        // Verify against a dummy hash when the user doesn't exist (or signs in with single
+        // sign-on and has no password), so timing doesn't leak usernames
+        $hash = $admin['password_hash'] ?? null;
+        $ok = password_verify($password, $hash ?? '$2y$10$abcdefghijklmnopqrstuuJ0f2Cq3tVZXKJ3Qb8rWm6cE6Yd0r9sW');
+        if ($admin === null || $hash === null || !$ok || (int) $admin['disabled'] === 1) {
             throw new HttpError(401, 'login_failed', 'Wrong username or password.');
         }
-        if (password_needs_rehash($admin['password_hash'], PASSWORD_DEFAULT)) {
+        if (password_needs_rehash($hash, PASSWORD_DEFAULT)) {
             Db::update('admins', ['password_hash' => password_hash($password, PASSWORD_DEFAULT)], ['id' => $admin['id']]);
         }
+        return self::establish($req, $admin);
+    }
+
+    /**
+     * Starts a fresh console session for an admins row (password or single sign-on).
+     *
+     * @return array{0: Principal, 1: string} principal and CSRF token
+     */
+    public static function establish(Request $req, array $admin, ?string $ssoProvider = null): array
+    {
         Db::run('UPDATE admins SET last_login_at = NOW() WHERE id = :id', ['id' => (int) $admin['id']]);
 
         self::startSession($req);
         session_regenerate_id(true);
+        $_SESSION = ['seen' => time()];
         $_SESSION['admin_id'] = (int) $admin['id'];
         $_SESSION['csrf'] = bin2hex(random_bytes(32));
+        if ($ssoProvider !== null) {
+            $_SESSION['sso_provider'] = $ssoProvider;
+        }
 
         $p = new Principal('admin', (int) $admin['id'], (string) $admin['username'], (string) $admin['role'],
             $req->ip(), (int) $admin['id']);
         return [$p, $_SESSION['csrf']];
+    }
+
+    /** Provider id the current session signed in with, or null for a password sign-in. */
+    public static function sessionSsoProvider(): ?string
+    {
+        $v = $_SESSION['sso_provider'] ?? null;
+        return is_string($v) ? $v : null;
     }
 
     public static function csrfToken(): string

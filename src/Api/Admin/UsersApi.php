@@ -6,6 +6,7 @@ namespace Shepherd\Api\Admin;
 
 use Shepherd\Audit;
 use Shepherd\Auth\AdminAuth;
+use Shepherd\Auth\OidcProvider;
 use Shepherd\Auth\Principal;
 use Shepherd\Db;
 use Shepherd\Http\HttpError;
@@ -18,9 +19,14 @@ final class UsersApi
 {
     private static function presentUser(array $u): array
     {
+        $sso = $u['sso_provider'] ?? null;
         return [
             'id' => (int) $u['id'],
             'username' => $u['username'],
+            'email' => $u['email'] ?? null,
+            'sso' => $sso === null ? null : ['id' => $sso, 'label' => OidcProvider::labelFor($sso)],
+            // The identity provider sets this user's role at every sign-in
+            'role_managed' => $sso !== null && (OidcProvider::find($sso)?->managesRoles() ?? false),
             'role' => $u['role'],
             'disabled' => (bool) $u['disabled'],
             'created_at' => Util::iso($u['created_at']),
@@ -81,7 +87,10 @@ final class UsersApi
         $b = $req->json();
         $changes = [];
         $errors = [];
-        if (array_key_exists('role', $b)) {
+        $present = self::presentUser($user);
+        if (array_key_exists('role', $b) && $present['role_managed'] && $b['role'] !== $user['role']) {
+            $errors['role'] = "{$present['sso']['label']} sets this user's role. Change their groups or app roles there.";
+        } elseif (array_key_exists('role', $b)) {
             if (!is_string($b['role']) || !isset(Principal::ROLES[$b['role']])) {
                 $errors['role'] = 'Use viewer, operator or admin.';
             } else {
@@ -95,7 +104,9 @@ final class UsersApi
                 $changes['disabled'] = $b['disabled'];
             }
         }
-        if (array_key_exists('password', $b)) {
+        if (array_key_exists('password', $b) && $present['sso'] !== null) {
+            $errors['password'] = 'This user signs in with single sign-on and has no password here.';
+        } elseif (array_key_exists('password', $b)) {
             $err = is_string($b['password']) ? AdminAuth::validatePassword($b['password']) : 'Must be text.';
             if ($err !== null) {
                 $errors['password'] = $err;

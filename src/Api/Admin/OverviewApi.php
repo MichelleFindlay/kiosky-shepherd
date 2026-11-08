@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Shepherd\Api\Admin;
 
 use Shepherd\Auth\AdminAuth;
+use Shepherd\Config;
 use Shepherd\Db;
 use Shepherd\Devices;
 use Shepherd\Http\Request;
@@ -63,6 +64,7 @@ final class OverviewApi
             'attention' => array_slice($attention, 0, 50),
             'pending_commands' => (int) Db::value("SELECT COUNT(*) FROM commands WHERE status IN ('pending', 'delivered')"),
             'profiles' => (int) Db::value('SELECT COUNT(*) FROM profiles'),
+            'cron' => self::cronStatus(),
             'recent_events' => array_map(static fn ($e) => [
                 'id' => (int) $e['id'],
                 'device_id' => (int) $e['device_id'],
@@ -72,6 +74,19 @@ final class OverviewApi
                 'created_at' => Util::iso($e['created_at']),
             ], Db::all('SELECT e.*, d.name FROM device_events e JOIN devices d ON d.id = e.device_id ORDER BY e.id DESC LIMIT 20')),
         ]);
+    }
+
+    /** When bin/cron.php last finished. Stale after 30 minutes (it should run every 10). */
+    private static function cronStatus(): array
+    {
+        $data = json_decode((string) @file_get_contents(Config::storage('cron-last-run.json')), true);
+        $at = is_array($data) && is_string($data['at'] ?? null) ? $data['at'] : null;
+        $time = $at === null ? false : strtotime($at);
+        return [
+            'last_run_at' => $time === false ? null : $at,
+            'summary' => is_array($data) && is_string($data['summary'] ?? null) ? $data['summary'] : null,
+            'stale' => $time === false || $time < time() - 1800,
+        ];
     }
 
     /** GET /api/v1/admin/audit?limit=&before=&target_type=&target_id= */

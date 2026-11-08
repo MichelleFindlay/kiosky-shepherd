@@ -47,7 +47,11 @@ if (($err = AdminAuth::validatePassword($password)) !== null) {
 }
 
 $hash = password_hash($password, PASSWORD_DEFAULT);
-$existing = Db::one('SELECT id FROM admins WHERE username = :u', ['u' => $username]);
+$existing = Db::one('SELECT * FROM admins WHERE username = :u', ['u' => $username]);
+if ($existing !== null && ($existing['sso_provider'] ?? null) !== null) {
+    fwrite(STDERR, "$username signs in with single sign-on ({$existing['sso_provider']}); pick another username.\n");
+    exit(1);
+}
 if ($existing !== null) {
     Db::update('admins', ['password_hash' => $hash, 'role' => $role, 'disabled' => 0], ['id' => $existing['id']]);
     echo "Updated $username ($role).\n";

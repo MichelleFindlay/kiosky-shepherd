@@ -132,7 +132,7 @@ const api = {
   upload(p, form) { return this.req('POST', p, form, true); },
 };
 
-const state = { me: null, schema: null, commandTypes: null, timer: null };
+const state = { me: null, server: null, schema: null, commandTypes: null, timer: null };
 
 async function schema() {
   if (!state.schema) state.schema = await api.get('/admin/policy/schema');
@@ -174,6 +174,7 @@ function renderShell() {
     nav,
     h('div', { class: 'side-foot' },
       h('div', {}, h('a', { href: '#/account' }, state.me.username), ' · ', state.me.role),
+      state.server ? h('div', { class: 'version' }, `Kiosky Shepherd ${state.server.version}`) : null,
       h('button', { class: 'small', onclick: logout }, 'Sign out')));
   menuBtn.addEventListener('click', () => setMenu(!side.classList.contains('open')));
   app.append(h('div', { class: 'shell' }, side, mainEl));
@@ -196,31 +197,67 @@ function highlightNav() {
 function page(title, ...headExtras) {
   clear(mainEl);
   const head = h('div', { class: 'page-head' }, h('h1', {}, title), h('div', { class: 'spacer' }), ...headExtras);
-  mainEl.append(head);
+  mainEl.append(migrationBanner(), head);
   return mainEl;
 }
+
+// After an upgrade, admins can apply new database migrations here instead of over SSH
+function migrationBanner() {
+  const pending = state.server && state.server.pending_migrations;
+  if (!pending || !pending.length) return null;
+  const btn = h('button', { class: 'primary small' }, 'Update database');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const r = await api.post('/admin/migrate');
+      state.server.pending_migrations = [];
+      toast(r.applied.length ? `Applied ${r.applied.join(', ')}.` : 'The database was already up to date.');
+      route();
+    } catch (ex) { fail(ex); btn.disabled = false; }
+  });
+  return h('div', { class: 'card banner' },
+    h('div', {}, h('strong', {}, 'The database needs an update. '),
+      `This version of Kiosky Shepherd added ${pending.join(', ')}. Back up the database first if you can.`),
+    btn);
+}
+
+// Reasons the server's /sso/…/callback can send back as #sso-error=…
+const SSO_ERRORS = {
+  sso_unavailable: 'That sign-in option isn\'t set up on this server.',
+  sso_expired: 'The sign-in took too long or was started in another browser tab or window. Try again.',
+  sso_failed: 'Single sign-on didn\'t work. An admin can find the reason in the audit log or the server\'s error log.',
+  sso_denied: 'The identity provider didn\'t sign you in.',
+  no_role: 'Your account isn\'t in any group or app role that\'s allowed into Kiosky Shepherd. Ask an admin for access.',
+  disabled: 'Your Kiosky Shepherd account is disabled.',
+  groups_overage: 'You\'re in too many groups for them to fit in the sign-in token. Ask an admin to use app roles, or to send only the groups assigned to the app.',
+};
 
 async function renderLogin() {
   stopTimer();
   let setupError = null;
+  let ssoError = null;
+  const m = location.hash.match(/^#sso-error=([a-z_]+)$/);
+  if (m) {
+    ssoError = SSO_ERRORS[m[1]] || SSO_ERRORS.sso_failed;
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+  let options = { password: true, providers: [] };
   try {
-    const s = await api.get('/admin/setup');
+    const [s, o] = await Promise.all([api.get('/admin/setup'), api.get('/admin/login-options')]);
     if (s.needed) { renderSetup(s.enabled, s.install); return; }
+    options = o;
   } catch (e) {
     setupError = `The server API isn't answering properly (${e.message}). Open /api/v1/health to check it.`;
   }
   const user = h('input', { type: 'text', autocomplete: 'username', required: true });
   const pass = h('input', { type: 'password', autocomplete: 'current-password', required: true });
   const err = h('div', { class: 'error-text', hidden: true });
-  const form = h('form', {
+  const form = options.password ? h('form', {
     onsubmit: async (e) => {
       e.preventDefault();
       err.hidden = true;
       try {
-        const r = await api.post('/admin/session', { username: user.value, password: pass.value });
-        api.csrf = r.csrf_token;
-        state.me = r.user;
-        start();
+        signedIn(await api.post('/admin/session', { username: user.value, password: pass.value }));
       } catch (ex) {
         err.textContent = ex.message;
         err.hidden = false;
@@ -228,11 +265,16 @@ async function renderLogin() {
     },
   },
   field('Username', user), field('Password', pass), err,
-  h('button', { class: 'primary', type: 'submit' }, 'Sign in'));
+  h('button', { class: 'primary', type: 'submit' }, 'Sign in')) : null;
+  const sso = options.providers.length ? h('div', { class: 'sso' },
+    options.providers.map((p) => h('a', { class: 'btn', href: p.url }, p.label))) : null;
   clear(document.getElementById('app')).append(h('div', { class: 'login' },
     h('div', { class: 'card' }, logo(), h('h1', {}, 'Kiosky Shepherd'), h('p', { class: 'sub' }, 'Sign in to manage your kiosks.'),
-      setupError ? h('p', { class: 'error-text' }, setupError) : null, form)));
-  user.focus();
+      setupError ? h('p', { class: 'error-text' }, setupError) : null,
+      ssoError ? h('p', { class: 'error-text' }, ssoError) : null,
+      sso, sso && form ? h('div', { class: 'or' }, 'or') : null, form,
+      !sso && !form && !setupError ? h('p', { class: 'error-text' }, 'No sign-in method is turned on in config/config.php.') : null)));
+  if (form) user.focus();
 }
 
 function logo() {
@@ -257,10 +299,7 @@ function renderSetup(enabled, install) {
           e.preventDefault();
           err.hidden = true;
           try {
-            const r = await api.post('/admin/setup', { setup_key: key.value, username: user.value, password: pass.value });
-            api.csrf = r.csrf_token;
-            state.me = r.user;
-            start();
+            signedIn(await api.post('/admin/setup', { setup_key: key.value, username: user.value, password: pass.value }));
           } catch (ex) {
             const f = ex.details && ex.details.fields;
             err.textContent = f ? Object.values(f).join(' ') : ex.message;
@@ -365,7 +404,15 @@ async function viewOverview() {
         h('td', { class: 'trunc' }, e.data ? JSON.stringify(e.data.data ?? e.data) : ''),
         h('td', {}, when(e.created_at))))))));
     }
-    mainEl.append(h('div', { class: 'grid grid-2' }, attention, h('div', { class: 'stack' }, versions, events)));
+    const c = o.cron;
+    const server = h('div', { class: 'card' }, h('h2', {}, 'Server'), h('dl', { class: 'kv' },
+      h('dt', {}, 'Version'), h('dd', {}, state.server ? state.server.version : '—'),
+      h('dt', {}, 'Last cron run'), h('dd', {},
+        c.last_run_at ? h('span', { title: [dateTime(c.last_run_at), c.summary].filter(Boolean).join('\n') }, ago(c.last_run_at)) : 'never',
+        c.stale ? [' ', h('span', { class: 'chip warn' }, c.last_run_at ? 'Overdue' : 'Not set up')] : null)),
+      c.stale ? h('p', { class: 'sub' }, 'Schedule ', h('code', {}, 'php bin/cron.php'),
+        ' every 10 minutes (cPanel → Cron Jobs). It expires old commands and prunes old events.') : null);
+    mainEl.append(h('div', { class: 'grid grid-2' }, attention, h('div', { class: 'stack' }, versions, server, events)));
   };
   await render();
   every(30000, () => render().catch(() => {}));
@@ -966,14 +1013,18 @@ async function viewUsers() {
   page('Users');
   const roleSel = (value, onchange) => h('select', { onchange }, ['viewer', 'operator', 'admin'].map((r) => h('option', { value: r, selected: r === value }, r)));
   mainEl.append(h('div', { class: 'card' }, h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, h('th', {}, 'Username'), h('th', {}, 'Role'), h('th', { class: 'hide-sm' }, 'Last sign-in'), h('th', {}, 'Status'), h('th', {}))),
+    h('thead', {}, h('tr', {}, h('th', {}, 'Username'), h('th', { class: 'hide-sm' }, 'Signs in with'), h('th', {}, 'Role'), h('th', { class: 'hide-sm' }, 'Last sign-in'), h('th', {}, 'Status'), h('th', {}))),
     h('tbody', {}, users.map((u) => h('tr', {},
-      h('td', {}, u.username, u.id === state.me.id ? h('span', { class: 'sub' }, ' (you)') : null),
-      h('td', {}, roleSel(u.role, async (e) => { try { await api.patch(`/admin/users/${u.id}`, { role: e.target.value }); toast('Role changed.'); } catch (ex) { fail(ex); route(); } })),
+      h('td', {}, u.username, u.id === state.me.id ? h('span', { class: 'sub' }, ' (you)') : null,
+        u.email && u.email !== u.username ? h('div', { class: 'sub' }, u.email) : null),
+      h('td', { class: 'hide-sm' }, u.sso ? u.sso.label : 'Password'),
+      h('td', {}, u.role_managed
+        ? h('span', { title: `Set by ${u.sso.label} at each sign-in` }, u.role, h('div', { class: 'sub' }, `from ${u.sso.label}`))
+        : roleSel(u.role, async (e) => { try { await api.patch(`/admin/users/${u.id}`, { role: e.target.value }); toast('Role changed.'); } catch (ex) { fail(ex); route(); } })),
       h('td', { class: 'hide-sm' }, when(u.last_login_at)),
       h('td', {}, u.disabled ? h('span', { class: 'chip bad' }, 'Disabled') : h('span', { class: 'chip ok' }, 'Active')),
       h('td', {}, h('div', { class: 'actions' },
-        h('button', {
+        u.sso ? null : h('button', {
           class: 'small',
           onclick: async () => {
             const pw = window.prompt(`New password for ${u.username} (at least 10 characters):`);
@@ -998,6 +1049,7 @@ async function viewUsers() {
   const role = roleSel('operator');
   mainEl.append(h('div', { class: 'card stack-gap' }, h('h2', {}, 'Add a user'),
     h('p', { class: 'sub' }, 'viewer: read only. operator: rename devices, change overrides, send commands, create enrollment codes. admin: everything, including profiles, releases and users.'),
+    h('p', { class: 'sub' }, 'This adds a password user. Single sign-on users are added automatically the first time they sign in.'),
     h('form', {
       onsubmit: async (e) => {
         e.preventDefault();
@@ -1085,6 +1137,12 @@ async function viewAudit() {
 
 async function viewAccount() {
   page('Your account');
+  if (state.me.sso) {
+    mainEl.append(h('div', { class: 'card' }, h('h2', {}, 'Single sign-on'),
+      h('p', {}, `Signed in as ${state.me.username} (${state.me.role}) with ${state.me.sso.label}. `,
+        'Your password and, if roles come from there, your role are managed by your organisation\'s identity provider.')));
+    return;
+  }
   const cur = h('input', { type: 'password', autocomplete: 'current-password', required: true });
   const nw = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: 10 });
   mainEl.append(h('div', { class: 'card' }, h('h2', {}, 'Change password'),
@@ -1104,6 +1162,13 @@ async function viewAccount() {
 
 /* -------------------------------------------------------------------- start */
 
+function signedIn(r) {
+  api.csrf = r.csrf_token;
+  state.me = r.user;
+  state.server = r.server;
+  start();
+}
+
 async function start() {
   renderShell();
   await route();
@@ -1113,10 +1178,7 @@ window.addEventListener('hashchange', route);
 
 (async () => {
   try {
-    const r = await api.get('/admin/session');
-    api.csrf = r.csrf_token;
-    state.me = r.user;
-    start();
+    signedIn(await api.get('/admin/session'));
   } catch (e) {
     renderLogin();
   }

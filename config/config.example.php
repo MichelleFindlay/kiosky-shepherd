@@ -30,6 +30,56 @@ return [
     // X-Forwarded-Proto headers should be trusted.
     'trusted_proxies' => [],
 
+    // ---- Single sign-on (optional) -------------------------------------------
+    // Console users can sign in with Microsoft Entra ID or any OpenID Connect
+    // provider (Okta, Google Workspace, Keycloak, Authentik, Auth0…). Register
+    // https://<base_url>/sso/<id>/callback as the redirect URI, where <id> is the
+    // key below. Users are created on their first sign-in. See README.md.
+    //
+    // Roles: list claim values per role in 'role_map'. A user gets the highest
+    // role whose values appear in 'role_claim'; with no match they get
+    // 'default_role', and with null they're refused. When 'role_map' is set, the
+    // provider sets the role at every sign-in and the console can't change it.
+    'sso' => [
+        // 'entra' => [
+        //     'type' => 'entra',
+        //     'label' => 'Sign in with Microsoft',
+        //     'tenant' => '00000000-0000-0000-0000-000000000000', // Directory (tenant) ID
+        //     'client_id' => '00000000-0000-0000-0000-000000000000', // Application (client) ID
+        //     'client_secret' => '',
+        //     // App roles (recommended). Or 'groups' with group object IDs as the values.
+        //     'role_claim' => 'roles',
+        //     'role_map' => [
+        //         'admin' => ['Shepherd.Admin'],
+        //         'operator' => ['Shepherd.Operator'],
+        //         'viewer' => ['Shepherd.Viewer'],
+        //     ],
+        //     'default_role' => null,
+        // ],
+        // 'okta' => [
+        //     'type' => 'oidc',
+        //     'label' => 'Sign in with Okta',
+        //     'issuer' => 'https://example.okta.com', // must match the provider's discovery "issuer"
+        //     'client_id' => '',
+        //     'client_secret' => '',
+        //     'scopes' => ['openid', 'profile', 'email', 'groups'],
+        //     'role_claim' => 'groups', // dotted paths work too, e.g. 'realm_access.roles' for Keycloak
+        //     'role_map' => [
+        //         'admin' => ['kiosk-admins'],
+        //         'operator' => ['kiosk-operators'],
+        //         'viewer' => ['kiosk-viewers'],
+        //     ],
+        //     'default_role' => null,
+        //     // Optional: 'username_claim' => 'preferred_username', 'userinfo' => true,
+        //     // 'token_auth' => 'client_secret_basic' | 'client_secret_post',
+        //     // 'prompt' => 'select_account', 'disabled' => false,
+        // ],
+    ],
+
+    // Set false to allow only single sign-on in the console. Keep at least one
+    // working sign-in method: API tokens keep working either way.
+    'password_login' => true,
+
     // Session cookie is Secure by default; set false only for local http testing.
     'cookie_secure' => true,
     'session_lifetime' => 43200, // idle seconds before the console signs you out

@@ -33,6 +33,15 @@ $commands = Db::run("DELETE FROM commands WHERE status IN ('done', 'failed', 'ex
 $events = Db::run('DELETE FROM device_events WHERE created_at < NOW() - INTERVAL :d DAY', ['d' => $days])->rowCount();
 $audit = Db::run('DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL :d DAY', ['d' => max($days, 365)])->rowCount();
 $limits = Db::run('DELETE FROM rate_limits WHERE window_start < NOW() - INTERVAL 1 DAY')->rowCount();
+if (\Shepherd\Migrator::tableExists('sso_logins')) {
+    Db::run('DELETE FROM sso_logins WHERE created_at < NOW() - INTERVAL 1 HOUR');
+}
 
-printf("expired %d commands; pruned %d commands, %d events, %d audit rows, %d rate-limit rows\n",
+$summary = sprintf('expired %d commands; pruned %d commands, %d events, %d audit rows, %d rate-limit rows',
     $expired, $commands, $events, $audit, $limits);
+
+// Shown on the console's Overview page, so admins can tell cron is running
+@file_put_contents(Config::storage('cron-last-run.json'),
+    json_encode(['at' => gmdate('Y-m-d\TH:i:s\Z'), 'summary' => $summary]), LOCK_EX);
+
+echo $summary, "\n";

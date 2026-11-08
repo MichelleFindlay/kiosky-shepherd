@@ -6,6 +6,8 @@ namespace Shepherd\Api\Admin;
 
 use Shepherd\Audit;
 use Shepherd\Auth\AdminAuth;
+use Shepherd\Auth\OidcProvider;
+use Shepherd\Auth\Principal;
 use Shepherd\Config;
 use Shepherd\Db;
 use Shepherd\Migrator;
@@ -21,6 +23,9 @@ final class SessionApi
     {
         $username = trim((string) $req->input('username', ''));
         $password = (string) $req->input('password', '');
+        if (!Config::get('password_login', true)) {
+            throw HttpError::forbidden('Password sign-in is turned off. Use single sign-on.');
+        }
         if ($username === '' || $password === '') {
             throw HttpError::validation(['username' => 'Enter your username and password.']);
         }
@@ -35,18 +40,50 @@ final class SessionApi
         }
         RateLimiter::clear('login-user:' . strtolower($username));
         Audit::log($p, 'admin.login', 'admin', $p->id);
-        return Response::json(['user' => ['id' => $p->id, 'username' => $p->name, 'role' => $p->role], 'csrf_token' => $csrf]);
+        return Response::json(self::sessionInfo($p, $csrf));
     }
 
     /** GET /api/v1/admin/session */
     public static function me(Request $req): Response
     {
         $p = AdminAuth::require($req);
-        return Response::json([
-            'user' => ['id' => $p->adminId, 'username' => $p->name, 'role' => $p->role, 'via' => $p->type],
-            'csrf_token' => $p->type === 'admin' ? AdminAuth::csrfToken() : null,
-            'server' => ['version' => SHEPHERD_VERSION],
-        ]);
+        return Response::json(self::sessionInfo($p, $p->type === 'admin' ? AdminAuth::csrfToken() : null));
+    }
+
+    /** What the console needs after signing in: who you are, how you signed in, the server version. */
+    private static function sessionInfo(Principal $p, ?string $csrf): array
+    {
+        $sso = $p->type === 'admin' ? AdminAuth::sessionSsoProvider() : null;
+        $server = ['version' => SHEPHERD_VERSION];
+        if ($p->can('admin')) {
+            $server['pending_migrations'] = Migrator::pending();
+        }
+        return [
+            'user' => [
+                'id' => $p->adminId,
+                'username' => $p->name,
+                'role' => $p->role,
+                'via' => $p->type,
+                'sso' => $sso === null ? null : ['id' => $sso, 'label' => OidcProvider::labelFor($sso)],
+            ],
+            'csrf_token' => $csrf,
+            'server' => $server,
+        ];
+    }
+
+    /** POST /api/v1/admin/migrate  applies database updates after an upgrade (for hosts without SSH) */
+    public static function migrate(Request $req): Response
+    {
+        $p = AdminAuth::require($req, 'admin');
+        try {
+            $done = Migrator::run();
+        } catch (\PDOException $e) {
+            throw new HttpError(500, 'migration_failed', 'Updating the database failed: ' . $e->getMessage());
+        }
+        if ($done !== []) {
+            Audit::log($p, 'server.migrated', null, null, ['applied' => $done]);
+        }
+        return Response::json(['applied' => $done]);
     }
 
     /** DELETE /api/v1/admin/session */
@@ -121,7 +158,7 @@ final class SessionApi
         });
         [$p, $csrf] = AdminAuth::login($req, $username, $password);
         Audit::log($p, 'admin.setup', 'admin', $p->id);
-        return Response::json(['user' => ['id' => $p->id, 'username' => $p->name, 'role' => $p->role], 'csrf_token' => $csrf], 201);
+        return Response::json(self::sessionInfo($p, $csrf), 201);
     }
 
     /** POST /api/v1/admin/session/password */
@@ -133,8 +170,11 @@ final class SessionApi
         }
         $current = (string) $req->input('current_password', '');
         $new = (string) $req->input('new_password', '');
-        $hash = (string) Db::value('SELECT password_hash FROM admins WHERE id = :id', ['id' => $p->id]);
-        if (!password_verify($current, $hash)) {
+        $hash = Db::value('SELECT password_hash FROM admins WHERE id = :id', ['id' => $p->id]);
+        if ($hash === null) {
+            throw HttpError::conflict('You sign in with single sign-on, so you have no password here.');
+        }
+        if (!password_verify($current, (string) $hash)) {
             throw HttpError::validation(['current_password' => 'That is not your current password.']);
         }
         if (($err = AdminAuth::validatePassword($new)) !== null) {

@@ -9,6 +9,7 @@ use Shepherd\Api\Admin\OverviewApi;
 use Shepherd\Api\Admin\ProfilesApi;
 use Shepherd\Api\Admin\ReleasesApi;
 use Shepherd\Api\Admin\SessionApi;
+use Shepherd\Api\Admin\SsoApi;
 use Shepherd\Api\Admin\UsersApi;
 use Shepherd\Api\DeviceApi;
 use Shepherd\Http\Response;
@@ -32,6 +33,12 @@ return static function (Router $r): void {
     $r->post("$a/session/password", [SessionApi::class, 'changePassword']);
     $r->get("$a/setup", [SessionApi::class, 'setupStatus']);
     $r->post("$a/setup", [SessionApi::class, 'setup']);
+    $r->post("$a/migrate", [SessionApi::class, 'migrate']);
+    $r->get("$a/login-options", [SsoApi::class, 'options']);
+
+    // ---- Single sign-on (browser redirects; register the callback URL with the provider)
+    $r->get('/sso/{provider}/login', [SsoApi::class, 'start']);
+    $r->get('/sso/{provider}/callback', [SsoApi::class, 'callback']);
 
     $r->get("$a/overview", [OverviewApi::class, 'overview']);
     $r->get("$a/audit", [OverviewApi::class, 'audit']);

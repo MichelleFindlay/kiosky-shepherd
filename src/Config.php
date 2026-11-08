@@ -26,6 +26,8 @@ final class Config
         'retention_days' => 90,
         'pbkdf2_iterations' => 120000,
         'setup_key' => '',
+        'password_login' => true,
+        'sso' => [],
     ];
 
     /** @var array<string, mixed> */
