@@ -19,7 +19,7 @@
       }
     },
     "error": {
-      "cannot_connect": "Couldn't reach the server. Check the address (e.g. https://kiosks.example.com).",
+      "cannot_connect": "Couldn't reach the server. Check the address uses https and the server is online.",
       "invalid_auth": "The API token was refused."
     },
     "abort": {

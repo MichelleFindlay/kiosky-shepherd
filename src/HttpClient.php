@@ -71,7 +71,7 @@ final class HttpClient
             throw new \RuntimeException("Request to $url failed.");
         }
         $status = 0;
-        foreach ($http_response_header ?? [] as $h) {
+        foreach ($http_response_header as $h) {
             if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
                 $status = (int) $m[1]; // the last status line wins
             }
