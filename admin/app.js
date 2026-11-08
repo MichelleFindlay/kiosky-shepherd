@@ -164,14 +164,26 @@ function renderShell() {
   const app = clear(document.getElementById('app'));
   const nav = h('nav', { class: 'nav' }, NAV.filter(([, , r]) => can(r)).map(([href, label]) => h('a', { href }, label)));
   mainEl = h('main', { id: 'main' });
-  app.append(h('div', { class: 'shell' },
-    h('aside', { class: 'side' },
-      h('div', { class: 'brand' }, h('img', { class: 'brand-mark', src: 'img/logo-128.png', alt: '' }), 'Shepherd'),
-      nav,
-      h('div', { class: 'side-foot' },
-        h('div', {}, h('a', { href: '#/account' }, state.me.username), ' · ', state.me.role),
-        h('button', { class: 'small', onclick: logout }, 'Sign out'))),
-    mainEl));
+  // On phones the sidebar collapses into a top bar; this button opens the menu
+  const menuBtn = h('button', { class: 'menu-btn', type: 'button', 'aria-label': 'Menu', 'aria-expanded': 'false' },
+    h('span', {}), h('span', {}), h('span', {}));
+  const side = h('aside', { class: 'side' },
+    h('div', { class: 'side-top' },
+      h('a', { class: 'brand', href: '#/overview' }, h('img', { class: 'brand-mark', src: 'img/logo-128.png', alt: '' }), 'Shepherd'),
+      menuBtn),
+    nav,
+    h('div', { class: 'side-foot' },
+      h('div', {}, h('a', { href: '#/account' }, state.me.username), ' · ', state.me.role),
+      h('button', { class: 'small', onclick: logout }, 'Sign out')));
+  menuBtn.addEventListener('click', () => setMenu(!side.classList.contains('open')));
+  app.append(h('div', { class: 'shell' }, side, mainEl));
+}
+
+function setMenu(open) {
+  const side = document.querySelector('.side');
+  if (!side) return;
+  side.classList.toggle('open', open);
+  side.querySelector('.menu-btn').setAttribute('aria-expanded', String(open));
 }
 
 function highlightNav() {
@@ -298,6 +310,7 @@ async function route() {
   if (!state.me) return;
   stopTimer();
   const hash = location.hash || '#/overview';
+  setMenu(false);
   highlightNav();
   for (const [re, view] of ROUTES) {
     const m = hash.match(re);
@@ -437,8 +450,8 @@ async function viewDevices() {
       syncBulk();
     });
     tableBox.append(h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, can('operator') ? h('th', {}, all) : null, h('th', {}, 'Name'), h('th', {}, 'Profile'),
-        h('th', {}, 'Model'), h('th', {}, 'Kiosky'), h('th', {}, 'Page'), h('th', {}, 'Policy'), h('th', {}, 'Last seen'))),
+      h('thead', {}, h('tr', {}, can('operator') ? h('th', {}, all) : null, h('th', {}, 'Name'), h('th', { class: 'hide-sm' }, 'Profile'),
+        h('th', { class: 'hide-sm' }, 'Model'), h('th', {}, 'Kiosky'), h('th', { class: 'hide-sm' }, 'Page'), h('th', { class: 'hide-sm' }, 'Policy'), h('th', {}, 'Last seen'))),
       h('tbody', {}, r.items.map((d) => {
         const go = () => { location.hash = `#/devices/${d.id}`; };
         let box = null;
@@ -451,11 +464,11 @@ async function viewDevices() {
         return h('tr', { class: 'clickable', onclick: go },
           can('operator') ? h('td', {}, box) : null,
           h('td', {}, h('span', { class: 'dot ' + (d.online ? 'ok' : (d.status === 'active' ? 'bad' : '')) }), d.name),
-          h('td', {}, d.profile_name),
-          h('td', {}, [d.manufacturer, d.model].filter(Boolean).join(' ') || '—'),
+          h('td', { class: 'hide-sm' }, d.profile_name),
+          h('td', { class: 'hide-sm' }, [d.manufacturer, d.model].filter(Boolean).join(' ') || '—'),
           h('td', {}, d.app_version || '—'),
-          h('td', { class: 'trunc', title: st.current_url || '' }, st.current_url || '—'),
-          h('td', {}, d.status !== 'active' ? '—' : d.policy_current ? h('span', { class: 'chip ok' }, 'Applied') : h('span', { class: 'chip warn' }, 'Pending')),
+          h('td', { class: 'trunc hide-sm', title: st.current_url || '' }, st.current_url || '—'),
+          h('td', { class: 'hide-sm' }, d.status !== 'active' ? '—' : d.policy_current ? h('span', { class: 'chip ok' }, 'Applied') : h('span', { class: 'chip warn' }, 'Pending')),
           h('td', {}, when(d.last_seen_at)));
       })))));
     syncBulk();
@@ -692,7 +705,7 @@ function renderCommandTable(box, items, showDevice, reload) {
   if (!items.length) { box.append(h('div', { class: 'empty' }, 'No commands yet.')); return; }
   box.append(h('div', { class: 'table-wrap' }, h('table', {},
     h('thead', {}, h('tr', {}, showDevice ? h('th', {}, 'Device') : null, h('th', {}, 'Command'), h('th', {}, 'Status'),
-      h('th', {}, 'Result'), h('th', {}, 'Sent by'), h('th', {}, 'Queued'), h('th', {}))),
+      h('th', {}, 'Result'), h('th', { class: 'hide-sm' }, 'Sent by'), h('th', { class: 'hide-sm' }, 'Queued'), h('th', {}))),
     h('tbody', {}, items.map((c) => {
       const params = Object.keys(c.params).length ? ' ' + JSON.stringify(c.params) : '';
       const result = [];
@@ -711,8 +724,8 @@ function renderCommandTable(box, items, showDevice, reload) {
         h('td', {}, h('code', {}, c.type), h('span', { class: 'sub' }, params)),
         h('td', {}, statusChip(c.status)),
         h('td', {}, result.length ? result : '—'),
-        h('td', {}, c.created_by || '—'),
-        h('td', {}, when(c.created_at)),
+        h('td', { class: 'hide-sm' }, c.created_by || '—'),
+        h('td', { class: 'hide-sm' }, when(c.created_at)),
         h('td', {}, cancel));
     })))));
 }
@@ -723,12 +736,12 @@ async function viewProfiles() {
   const profiles = await api.get('/admin/profiles');
   page('Profiles');
   const list = h('div', { class: 'card' }, h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Description'), h('th', { class: 'num' }, 'Devices'), h('th', {}, 'Settings'))),
+    h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', { class: 'hide-sm' }, 'Description'), h('th', { class: 'num' }, 'Devices'), h('th', { class: 'hide-sm' }, 'Settings'))),
     h('tbody', {}, profiles.map((p) => h('tr', { class: 'clickable', onclick: () => { location.hash = `#/profiles/${p.id}`; } },
       h('td', {}, p.name, p.is_default ? h('span', { class: 'chip' }, 'default') : null),
-      h('td', {}, p.description || '—'),
+      h('td', { class: 'hide-sm' }, p.description || '—'),
       h('td', { class: 'num' }, p.device_count),
-      h('td', {}, `${Object.keys(p.settings).length} set`)))))));
+      h('td', { class: 'hide-sm' }, `${Object.keys(p.settings).length} set`)))))));
   mainEl.append(list);
 
   if (can('admin')) {
@@ -893,15 +906,15 @@ async function viewReleases() {
   if (!releases.length) list.append(h('div', { class: 'empty' }, 'No releases uploaded. Devices on the "server" source won\'t update until you add one.'));
   else {
     list.append(h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, h('th', {}, 'Version'), h('th', { class: 'num' }, 'Code'), h('th', {}, 'Size'), h('th', {}, 'SHA-256'),
-        h('th', { class: 'num' }, 'Devices on it'), h('th', {}, 'Uploaded'), h('th', {}, 'Offered'), h('th', {}))),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Version'), h('th', { class: 'num hide-sm' }, 'Code'), h('th', { class: 'hide-sm' }, 'Size'), h('th', { class: 'hide-sm' }, 'SHA-256'),
+        h('th', { class: 'num hide-sm' }, 'Devices on it'), h('th', { class: 'hide-sm' }, 'Uploaded'), h('th', {}, 'Offered'), h('th', {}))),
       h('tbody', {}, releases.map((r) => h('tr', {},
         h('td', {}, h('strong', {}, r.version_name), r.notes ? h('div', { class: 'sub' }, r.notes) : null),
-        h('td', { class: 'num' }, r.version_code),
-        h('td', {}, bytes(r.size)),
-        h('td', {}, h('code', { title: r.sha256 }, r.sha256.slice(0, 12) + '…')),
-        h('td', { class: 'num' }, r.devices_on_version ?? 0),
-        h('td', {}, when(r.created_at), r.uploaded_by ? h('div', { class: 'sub' }, r.uploaded_by) : null),
+        h('td', { class: 'num hide-sm' }, r.version_code),
+        h('td', { class: 'hide-sm' }, bytes(r.size)),
+        h('td', { class: 'hide-sm' }, h('code', { title: r.sha256 }, r.sha256.slice(0, 12) + '…')),
+        h('td', { class: 'num hide-sm' }, r.devices_on_version ?? 0),
+        h('td', { class: 'hide-sm' }, when(r.created_at), r.uploaded_by ? h('div', { class: 'sub' }, r.uploaded_by) : null),
         h('td', {}, r.active ? h('span', { class: 'chip ok' }, 'Yes') : h('span', { class: 'chip' }, 'Withdrawn')),
         h('td', {}, can('admin') ? h('div', { class: 'actions' },
           h('button', {
@@ -953,11 +966,11 @@ async function viewUsers() {
   page('Users');
   const roleSel = (value, onchange) => h('select', { onchange }, ['viewer', 'operator', 'admin'].map((r) => h('option', { value: r, selected: r === value }, r)));
   mainEl.append(h('div', { class: 'card' }, h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, h('th', {}, 'Username'), h('th', {}, 'Role'), h('th', {}, 'Last sign-in'), h('th', {}, 'Status'), h('th', {}))),
+    h('thead', {}, h('tr', {}, h('th', {}, 'Username'), h('th', {}, 'Role'), h('th', { class: 'hide-sm' }, 'Last sign-in'), h('th', {}, 'Status'), h('th', {}))),
     h('tbody', {}, users.map((u) => h('tr', {},
       h('td', {}, u.username, u.id === state.me.id ? h('span', { class: 'sub' }, ' (you)') : null),
       h('td', {}, roleSel(u.role, async (e) => { try { await api.patch(`/admin/users/${u.id}`, { role: e.target.value }); toast('Role changed.'); } catch (ex) { fail(ex); route(); } })),
-      h('td', {}, when(u.last_login_at)),
+      h('td', { class: 'hide-sm' }, when(u.last_login_at)),
       h('td', {}, u.disabled ? h('span', { class: 'chip bad' }, 'Disabled') : h('span', { class: 'chip ok' }, 'Active')),
       h('td', {}, h('div', { class: 'actions' },
         h('button', {
@@ -1004,10 +1017,10 @@ async function viewTokens() {
   if (!tokens.length) list.append(h('div', { class: 'empty' }, 'No API tokens.'));
   else {
     list.append(h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Token'), h('th', {}, 'Role'), h('th', {}, 'Owner'), h('th', {}, 'Last used'), h('th', {}, 'Expires'), h('th', {}))),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Token'), h('th', {}, 'Role'), h('th', { class: 'hide-sm' }, 'Owner'), h('th', { class: 'hide-sm' }, 'Last used'), h('th', {}, 'Expires'), h('th', {}))),
       h('tbody', {}, tokens.map((t) => h('tr', {},
-        h('td', {}, t.name), h('td', {}, h('code', {}, t.prefix + '…')), h('td', {}, t.role), h('td', {}, t.owner),
-        h('td', {}, when(t.last_used_at)), h('td', {}, t.expires_at ? dateTime(t.expires_at) : 'never'),
+        h('td', {}, t.name), h('td', {}, h('code', {}, t.prefix + '…')), h('td', {}, t.role), h('td', { class: 'hide-sm' }, t.owner),
+        h('td', { class: 'hide-sm' }, when(t.last_used_at)), h('td', {}, t.expires_at ? dateTime(t.expires_at) : 'never'),
         h('td', {}, h('button', {
           class: 'small danger',
           onclick: async () => {
@@ -1047,7 +1060,7 @@ async function viewAudit() {
   const tbody = h('tbody', {});
   const more = h('button', {}, 'Load more');
   box.append(h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Action'), h('th', {}, 'Target'), h('th', {}, 'Details'), h('th', {}, 'IP'))),
+    h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Action'), h('th', {}, 'Target'), h('th', { class: 'hide-sm' }, 'Details'), h('th', { class: 'hide-sm' }, 'IP'))),
     tbody)), h('div', { class: 'actions' }, more));
   const load = async () => {
     const r = await api.get('/admin/audit?limit=100' + (before ? `&before=${before}` : ''));
@@ -1058,8 +1071,8 @@ async function viewAudit() {
         h('td', {}, h('code', {}, a.action)),
         h('td', {}, a.target_type === 'device' ? h('a', { href: `#/devices/${a.target_id}` }, `device ${a.target_id}`)
           : a.target_type ? `${a.target_type} ${a.target_id ?? ''}` : '—'),
-        h('td', { class: 'trunc', title: a.details ? JSON.stringify(a.details) : '' }, a.details ? JSON.stringify(a.details) : ''),
-        h('td', {}, a.ip || '')));
+        h('td', { class: 'trunc hide-sm', title: a.details ? JSON.stringify(a.details) : '' }, a.details ? JSON.stringify(a.details) : ''),
+        h('td', { class: 'hide-sm' }, a.ip || '')));
       before = a.id;
     }
     more.hidden = r.items.length < 100;
