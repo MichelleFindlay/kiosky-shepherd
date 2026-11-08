@@ -9,10 +9,14 @@ use Shepherd\Audit;
 use Shepherd\Auth\AdminAuth;
 use Shepherd\Config;
 use Shepherd\Db;
+use Shepherd\Devices;
 use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
+use Shepherd\Migrator;
+use Shepherd\Policy;
 use Shepherd\Releases;
+use Shepherd\Util;
 
 final class ReleasesApi
 {
@@ -24,8 +28,95 @@ final class ReleasesApi
     public static function list(Request $req): Response
     {
         AdminAuth::require($req);
-        return Response::json(array_map([Releases::class, 'present'],
+        $targeted = self::targetCounts();
+        return Response::json(array_map(
+            static fn (array $r) => Releases::present($r) + ['devices_targeted' => $targeted[$r['version_name']] ?? 0],
             Db::all(self::SELECT . ' ORDER BY r.version_code DESC')));
+    }
+
+    /**
+     * How many active devices each release is the update target for, after profiles,
+     * rings and device overrides.
+     *
+     * @return array<string, int> version name => devices
+     */
+    private static function targetCounts(): array
+    {
+        $out = [];
+        foreach (Db::all(Devices::select() . " WHERE d.status = 'active'") as $d) {
+            $t = Releases::targetFor(Policy::forDevice($d));
+            if ($t !== null) {
+                $out[$t['version']] = ($out[$t['version']] ?? 0) + 1;
+            }
+        }
+        return $out;
+    }
+
+    // ---- Release rings (staged rollouts by tag) --------------------------------
+
+    /** GET /api/v1/admin/releases/rings  every ring, with how far its devices have got */
+    public static function rings(Request $req): Response
+    {
+        AdminAuth::require($req);
+        if (!Migrator::has('tag_releases')) {
+            return Response::json([]);
+        }
+        $latest = Db::one('SELECT version_name, version_code FROM releases WHERE active = 1 ORDER BY version_code DESC LIMIT 1');
+        $out = [];
+        foreach (Db::all('SELECT r.*, a.username FROM tag_releases r LEFT JOIN admins a ON a.id = r.updated_by ORDER BY r.tag') as $r) {
+            $version = $r['release_version'] === 'latest' ? ($latest['version_name'] ?? null) : $r['release_version'];
+            $code = $version === null ? null
+                : Db::value('SELECT version_code FROM releases WHERE version_name = :v', ['v' => $version]);
+            $counts = Db::one("SELECT COUNT(*) AS total, SUM(d.app_version_code = :c) AS on_it, SUM(d.app_version_code > :c2) AS newer
+                                 FROM devices d JOIN device_tags t ON t.device_id = d.id
+                                WHERE t.tag = :t AND d.status = 'active'",
+                ['t' => $r['tag'], 'c' => (int) $code, 'c2' => (int) $code]) ?? [];
+            $out[] = [
+                'tag' => $r['tag'],
+                'release' => $r['release_version'],
+                'resolves_to' => $version,
+                'devices' => (int) ($counts['total'] ?? 0),
+                'on_release' => (int) ($counts['on_it'] ?? 0),
+                'newer' => (int) ($counts['newer'] ?? 0),
+                'updated_by' => $r['username'],
+                'updated_at' => Util::iso($r['updated_at']),
+            ];
+        }
+        return Response::json($out);
+    }
+
+    /** PUT /api/v1/admin/releases/rings/{tag}  {release: "latest" | "1.2.0"} */
+    public static function setRing(Request $req): Response
+    {
+        $p = AdminAuth::require($req, 'admin');
+        Migrator::requireTable('tag_releases');
+        $tag = strtolower($req->param('tag'));
+        if (!Devices::isTag($tag)) {
+            throw HttpError::validation(['tag' => 'Not a valid tag.']);
+        }
+        $release = Policy::validate(['updates.release' => $req->input('release')])['updates.release'] ?? null;
+        if (!is_string($release)) {
+            throw HttpError::validation(['release' => 'Use "latest" or an uploaded version.']);
+        }
+        Db::run('INSERT INTO tag_releases (tag, release_version, updated_by) VALUES (:t, :r, :by)
+                 ON DUPLICATE KEY UPDATE release_version = :r2, updated_by = :by2',
+            ['t' => $tag, 'r' => $release, 'by' => $p->adminId, 'r2' => $release, 'by2' => $p->adminId]);
+        Releases::forgetRings();
+        Audit::log($p, 'release.ring_set', 'tag', $tag, ['release' => $release]);
+        return Response::json(['tag' => $tag, 'release' => $release]);
+    }
+
+    /** DELETE /api/v1/admin/releases/rings/{tag} */
+    public static function deleteRing(Request $req): Response
+    {
+        $p = AdminAuth::require($req, 'admin');
+        Migrator::requireTable('tag_releases');
+        $tag = strtolower($req->param('tag'));
+        if (Db::run('DELETE FROM tag_releases WHERE tag = :t', ['t' => $tag])->rowCount() === 0) {
+            throw HttpError::notFound('Ring');
+        }
+        Audit::log($p, 'release.ring_deleted', 'tag', $tag);
+        return Response::noContent();
     }
 
     /**
@@ -165,6 +256,11 @@ final class ReleasesApi
         foreach (Db::all("SELECT name, overrides FROM devices WHERE status = 'active'") as $d) {
             if ((Db::decode($d['overrides'])['updates.release'] ?? null) === $rel['version_name']) {
                 $pinned[] = 'device ' . $d['name'];
+            }
+        }
+        if (Migrator::has('tag_releases')) {
+            foreach (Db::all('SELECT tag FROM tag_releases WHERE release_version = :v', ['v' => $rel['version_name']]) as $ring) {
+                $pinned[] = 'the ' . $ring['tag'] . ' ring';
             }
         }
         if ($pinned !== []) {

@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-// Creates a console user, or resets an existing user's password.
+// Creates a console user, or resets an existing user's password (which also turns
+// off their two-factor sign-in, so this is the way back in after losing a phone).
 // Usage: php bin/create-admin.php <username> [viewer|operator|admin]
 // The password is read from the terminal (or stdin when piped).
 
@@ -53,8 +54,13 @@ if ($existing !== null && ($existing['sso_provider'] ?? null) !== null) {
     exit(1);
 }
 if ($existing !== null) {
-    Db::update('admins', ['password_hash' => $hash, 'role' => $role, 'disabled' => 0], ['id' => $existing['id']]);
-    echo "Updated $username ($role).\n";
+    $changes = ['password_hash' => $hash, 'role' => $role, 'disabled' => 0];
+    $had2fa = !empty($existing['totp_secret'] ?? null);
+    if (array_key_exists('totp_secret', $existing)) {
+        $changes += ['totp_secret' => null, 'totp_last_step' => null, 'totp_recovery' => null];
+    }
+    Db::update('admins', $changes, ['id' => $existing['id']]);
+    echo "Updated $username ($role)" . ($had2fa ? '; two-factor sign-in is now off' : '') . ".\n";
 } else {
     Db::insert('admins', ['username' => $username, 'password_hash' => $hash, 'role' => $role]);
     echo "Created $username ($role).\n";

@@ -15,6 +15,26 @@ final class Migrator
         ) > 0;
     }
 
+    /** @var array<string, bool> per-request cache for has() */
+    private static array $has = [];
+
+    /**
+     * Cached tableExists(), for code that must keep working before a migration
+     * that adds the table has been applied (the console's "Update database" banner).
+     */
+    public static function has(string $table): bool
+    {
+        return self::$has[$table] ??= self::tableExists($table);
+    }
+
+    /** Throws a clear 409 when a feature's table hasn't been created yet. */
+    public static function requireTable(string $table): void
+    {
+        if (!self::has($table)) {
+            throw Http\HttpError::conflict('This needs the latest database update. An admin can apply it with the Update database button.');
+        }
+    }
+
     /** @return list<string> migration file names not yet applied */
     public static function pending(): array
     {
@@ -52,8 +72,83 @@ final class Migrator
             }
             Db::run('INSERT IGNORE INTO schema_migrations (name) VALUES (:n)', ['n' => $name]);
             $done[] = $name;
+            self::$has = [];
         }
+        self::writeMarker(self::APPLIED_MARKER);
+        @unlink(Config::storage(self::FAILED_MARKER));
         return $done;
+    }
+
+    // ---- Automatic updates ---------------------------------------------------
+
+    /** Holds the signature of the migration files once all of them are applied. */
+    private const APPLIED_MARKER = 'schema-applied.txt';
+    /** Holds the signature when an automatic update failed, so it isn't retried on every request. */
+    private const FAILED_MARKER = 'schema-auto-failed.txt';
+    private const LOCK = 'kiosky_shepherd_migrate';
+
+    /** Changes whenever a migration file is added or renamed. */
+    private static function signature(): string
+    {
+        return hash('sha256', implode("\n", array_map('basename', self::files())));
+    }
+
+    private static function writeMarker(string $file): void
+    {
+        @file_put_contents(Config::storage($file), self::signature(), LOCK_EX);
+    }
+
+    private static function markerMatches(string $file): bool
+    {
+        return @file_get_contents(Config::storage($file)) === self::signature();
+    }
+
+    /**
+     * Applies pending migrations on the first request after an upgrade (config
+     * 'auto_migrate', on by default), so nobody has to click "Update database".
+     * Normal requests only compare a marker file in storage/ and don't touch the
+     * database. A MySQL lock lets one request run the update while others carry on;
+     * a failed update is logged and not retried until the migration files change,
+     * and the console's Update database button stays available.
+     */
+    public static function autoRun(): void
+    {
+        if (!Config::get('auto_migrate', true) || self::markerMatches(self::APPLIED_MARKER)
+            || self::markerMatches(self::FAILED_MARKER)) {
+            return;
+        }
+        try {
+            // A brand-new database is installed by the first-run setup, not here
+            if (!self::tableExists('schema_migrations')) {
+                return;
+            }
+            if (self::pending() === []) {
+                self::writeMarker(self::APPLIED_MARKER);
+                return;
+            }
+            if ((int) Db::value('SELECT GET_LOCK(:l, 0)', ['l' => self::LOCK]) !== 1) {
+                return; // another request is applying it right now
+            }
+        } catch (\Throwable $e) {
+            error_log('[kiosky-shepherd] auto-migrate check failed: ' . $e->getMessage());
+            return;
+        }
+        try {
+            $done = self::run();
+            if ($done !== []) {
+                Audit::log(null, 'server.migrated', null, null, ['applied' => $done, 'automatic' => true]);
+            }
+        } catch (\Throwable $e) {
+            error_log('[kiosky-shepherd] automatic database update failed: ' . $e->getMessage()
+                . ' (not retried automatically; use the console\'s Update database button or php bin/migrate.php)');
+            self::writeMarker(self::FAILED_MARKER);
+        } finally {
+            try {
+                Db::value('SELECT RELEASE_LOCK(:l)', ['l' => self::LOCK]);
+            } catch (\Throwable) {
+                // the lock is released when the connection closes anyway
+            }
+        }
     }
 
     /** Splits a migration into statements: strips whole-line comments, splits on ; at line ends. */

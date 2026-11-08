@@ -11,12 +11,25 @@ locked down.
 - **Profiles**: named policies (start page, allowed sites, toolbar lockdown,
   technician PIN, boot, screen, orientation, updates…) with per-device overrides
 - **Remote commands**: reload, open a page, restart, clear cache or sign-out
-  data, show a message, identify, screenshot, check for updates
+  data, show a message, identify, screenshot, check for updates. Send them to
+  one device, a selection, a profile, a tag or everything, or **schedule** them
+  (e.g. reload the lobby tablets every day at 05:00, or switch them to a Night
+  profile at 22:00)
+- **Tags** for grouping devices across profiles, with filtering and bulk tagging
 - **Managed updates**: upload Kiosky APKs, roll out "latest" or pin a version per
-  profile or device. The server reads each APK's real version and package name.
-- **Monitoring**: online status, current page, permissions, versions, event log
-- **Web console** with viewer / operator / admin roles, **API tokens** for
-  scripts, and a full **audit log**
+  profile, tag ("canary" first, then everyone) or device. The server reads each
+  APK's real version and package name.
+- **Monitoring**: online status, current page, permissions, versions, event log,
+  a screenshot gallery, **live view**, daily **health history** (uptime, battery,
+  Wi-Fi) with charts, and **offline alerts** by email, Slack, Teams, Discord,
+  ntfy or any webhook
+- **Web console** with viewer / operator / admin roles, **two-factor sign-in**,
+  **API tokens** for scripts, and a full **audit log**
+- **Profile history** with what changed in each save and one-click restore, and
+  **export and import** as JSON for backups or copying setups between servers
+- **Users limited to some devices** (by tag), e.g. one building's site manager
+- **Home Assistant integration**: tablets as devices with sensors and buttons, and
+  services such as "show a message on the hallway tablet"
 - **Single sign-on** with Microsoft Entra ID or any OpenID Connect provider,
   with roles mapped from groups or app roles
 
@@ -62,12 +75,15 @@ each folder also has its own deny-all file.
    outside the web root.
 6. **Add a cron job** (cPanel → Cron Jobs), every 10 minutes:
    `php /home/you/kiosks.example.com/bin/cron.php`
-   It expires old commands and prunes events past `retention_days`. The
-   console's Overview page shows when it last ran, and flags it after 30 minutes.
+   It runs scheduled commands, sends offline alerts, expires old commands and
+   prunes events past `retention_days`. The console's sidebar and Overview page
+   show when it last ran, and flag it after 30 minutes.
 7. **Check the lockdown.** Each of these must return **403**:
    `https://kiosks.example.com/config/config.php`,
    `https://kiosks.example.com/src/Db.php`,
-   `https://kiosks.example.com/sql/migrations/001_initial.sql`.
+   `https://kiosks.example.com/sql/migrations/001_initial.sql`,
+   `https://kiosks.example.com/tests/smoke.php`,
+   `https://kiosks.example.com/custom_components/kiosky_shepherd/api.py`.
    If any returns 200 or downloads, your host is ignoring `.htaccess`, and
    you must not continue until that's fixed.
 
@@ -83,9 +99,10 @@ server {
     root /srv/kiosky-shepherd;
     index index.php;
 
-    location ~ ^/(src|config|storage|sql|bin|docs)(/|$) { deny all; return 404; }
+    location ~ ^/(src|config|storage|sql|bin|docs|tests|custom_components)(/|$) { deny all; return 404; }
     location ~ /\.(?!well-known/) { deny all; return 404; }
-    location ~ \.(md|sql)$ { deny all; return 404; }
+    location ~ \.(md|sql|dist|neon|py)$ { deny all; return 404; }
+    location = /hacs.json { deny all; return 404; }
 
     location /admin/ { try_files $uri $uri/ =404; }
     location / { try_files $uri /index.php$is_args$args; }
@@ -105,9 +122,26 @@ so the server sees client IPs and HTTPS correctly.
 ### Upgrading
 
 Upload the new files over the old ones (keep `config/config.php` and `storage/`).
-If the new version changes the database, admins see an **Update database**
-banner in the console; click it. With SSH you can run `php bin/migrate.php`
-instead, or import the new files from `sql/migrations/` in phpMyAdmin.
+If the new version changes the database, the first request afterwards (a console
+page, a tablet check-in or cron) applies the update automatically and records it
+in the audit log. Take a database backup before uploading if you want one.
+
+To apply updates yourself instead, set `'auto_migrate' => false`. Admins then see
+an **Update database** banner in the console; click it. With SSH you can run
+`php bin/migrate.php` instead, or import the new files from `sql/migrations/` in
+phpMyAdmin. The banner also appears if an automatic update fails; the reason is in
+the PHP error log, and it isn't retried automatically until you upload new files.
+
+**1.4.0** adds `sql/migrations/004_insights.sql` (applied automatically) and a
+`custom_components/` folder with its own `.htaccess`; upload both. It also adds
+four "Screen schedule" policy settings, so every device's policy version changes
+once and shows **Pending** until its next check-in.
+
+**1.3.0** adds `sql/migrations/003_fleet.sql`. Until it's applied, everything
+from 1.2.0 keeps working, but tags, schedules, two-factor setup, fast check-ins
+and alerts are unavailable (they answer "needs the latest database update"). Also upload the new
+`tests/.htaccess`, and copy the new `alerts`, `timezone` and
+`fast_checkin_seconds` settings from `config/config.example.php` if you want them.
 
 ## Local development
 
@@ -120,6 +154,23 @@ php -S localhost:8080 index.php
 
 Then open <http://localhost:8080/>. The built-in server only passes `/admin/`
 files through; everything else goes to `index.php`.
+
+### Tests
+
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on every
+push: `php -l` on PHP 8.1 and 8.4, `node --check` on the console, PHPStan
+([phpstan.neon.dist](phpstan.neon.dist)), and an end-to-end smoke test against MySQL 8.0 and
+MariaDB 10.6. The smoke test ([tests/smoke.php](tests/smoke.php)) enrolls a fake device and
+works through check-ins, commands, tags, schedules and profile switches, profile
+export, import, history and restore, release rings, health history, live view,
+scoped users, two-factor sign-in, rate limits and retirement, then runs
+`bin/cron.php`. The Home Assistant integration is imported against a real Home
+Assistant install and checked with `hassfest`. To run it
+locally against a development server (never production; it enrolls a device):
+
+```sh
+php tests/smoke.php http://localhost:8080 admin 'your-password'
+```
 
 ## How lockdown works
 
@@ -143,8 +194,148 @@ the Home button. Combine Shepherd with Android's app pinning for wall panels.
 | Role | Can |
 | --- | --- |
 | viewer | See everything except users and the audit log |
-| operator | Also rename devices, assign profiles, set device overrides, send commands, create and revoke enrollment codes, retire devices |
-| admin | Also edit profiles, upload releases, manage users, read the audit log, delete retired devices |
+| operator | Also rename and tag devices, assign profiles, set device overrides, send and schedule commands, create and revoke enrollment codes, retire devices |
+| admin | Also edit and restore profiles, upload releases and set release rings, manage users, read the audit log, delete retired devices |
+
+### Users limited to some devices
+
+An admin can limit an operator or viewer to devices carrying certain tags
+(**Users → Devices…**), for example `building-a`. They then see only those devices,
+their commands and screenshots everywhere in the console and API (their API tokens
+too); "all devices" in a bulk command means all of *their* devices. They can't see
+enrollment codes or schedules, which act on the whole fleet, and they can't remove
+their own tags from a device. Admins always see everything.
+
+## Two-factor sign-in
+
+Password users can add a code from an authenticator app (Microsoft Authenticator,
+Google Authenticator, 1Password, Bitwarden…) under **Your account → Two-factor
+sign-in**. Turning it on shows ten single-use recovery codes; each signs in once
+if the phone is lost. Single sign-on users get their provider's MFA instead, and
+API tokens are not affected.
+
+Locked out?
+
+- Another admin can click **Reset 2FA** for you under **Users**.
+- With SSH: `php bin/create-admin.php <you> admin` sets a new password and turns
+  two-factor sign-in off.
+- With only phpMyAdmin: `UPDATE admins SET totp_secret = NULL, totp_last_step = NULL, totp_recovery = NULL WHERE username = 'you';`
+
+## Offline alerts
+
+Fill in `alerts` in `config/config.php` (see `config.example.php`) with email
+addresses and/or webhooks, then click **Send test alert** on the Overview page.
+Every cron run, devices that haven't checked in for `offline_minutes` (default
+15, never less than 3 check-in intervals) are reported in one message, and again
+in one message when they come back. Devices that never checked in, retired
+devices and devices tagged `no-alerts` (`ignore_tags`) are left out.
+
+| `type` | Sends |
+| --- | --- |
+| `slack` | `{"text": …}`, which Slack, Mattermost and Rocket.Chat incoming webhooks accept |
+| `teams` | An Adaptive Card, for a Teams **Workflows** webhook ("Post to a channel when a webhook request is received") |
+| `discord` | `{"content": …}` |
+| `ntfy` | Plain text with a title, to an [ntfy](https://ntfy.sh) topic URL |
+| `json` | `{"event": "devices_offline" \| "devices_online" \| "test", "title", "text", "devices": [{id, name, last_seen_at}], "console", "server", "sent_at"}` |
+
+Each webhook can add `'headers' => ['Authorization' => '…']`. Email uses PHP's
+`mail()`, which most shared hosts support; set `email_from` to an address on your
+domain if messages land in spam.
+
+## Scheduled commands
+
+**Schedules** queues a command on chosen weekdays at a time in a chosen time zone
+(daylight saving is handled), for all devices, a profile or a tag. `bin/cron.php`
+runs them, so they go out up to one cron interval after the set time; a run
+missed by more than an hour (cron wasn't running) is skipped rather than sent
+late. **Run now** queues one immediately. Commands from a schedule show its name
+under **Sent by**.
+
+### Switching profiles on a schedule
+
+A schedule can also **Switch to profile**: it moves its devices to another
+profile, and they apply that profile's policy at their next check-in. Two
+schedules on a tag, e.g. "lobby → Night at 22:00" and "lobby → Day at 07:00", give
+a night-time dashboard or a different start page out of hours, without any app
+support. Each move is in the device's event log.
+
+## Profile history
+
+Every save of a profile is kept (the last 200 per profile). The profile page lists
+them with who saved them and exactly what changed; **Restore** puts the profile
+back as it was, recorded as a new version, so a restore can itself be undone.
+Technician PINs show only as "set". Settings this server no longer knows are
+dropped on restore, and a pinned release must still be uploaded.
+
+## Staged rollouts
+
+Under **Releases → Staged rollouts**, point a tag at a release ("latest" or a
+version), e.g. tag three tablets `canary` and give the canary ring a new APK. Those
+devices get it at their next check-in while the rest follow their profile; the
+ring list shows how many are on it, and the release table how many devices each
+release is targeted at. When it looks good, move the profiles over and remove the
+ring. A device's own `updates.release` override still wins, and a device in
+several rings follows the newest release.
+
+## Health history
+
+At each check-in the server adds to a small daily summary per device: how long it
+was online, its lowest and highest battery, Wi-Fi signal and page errors (days run
+midnight to midnight in `timezone`). The device page charts the last 30 days, the
+device list shows the share of the last 7 days each device was online, and the
+Overview flags devices below 90%. Summaries are kept for a year.
+
+## Live view
+
+**Live view** on a device page streams the tablet's screen every 2 seconds for as
+long as the page is open. It needs a Kiosky version that supports the `live_view`
+command ([docs/PROTOCOL.md](docs/PROTOCOL.md) §7); older versions report "unsupported
+command", and **Take screenshot** still works. Only the latest frame is kept.
+
+## Screen schedule
+
+The **Screen schedule** policy settings turn the screen off at night (e.g. 22:00
+to 07:00, in the tablet's own time), with an optional touch-to-wake. They need a
+Kiosky version that supports them (§5.2 of the protocol); others ignore them.
+
+## Home Assistant
+
+The `custom_components/kiosky_shepherd` folder is a Home Assistant integration.
+Install it with [HACS](https://hacs.xyz) (add this repository as a custom
+repository, type Integration) or copy the folder into Home Assistant's
+`config/custom_components/`, restart, and add **Kiosky Shepherd** under
+**Settings → Devices & services**. It asks for the server address and an API token
+(**API tokens** in the console): viewer is enough for sensors, operator for
+buttons and services. A token limited to some devices (see above) only brings in
+those.
+
+Each tablet becomes a device with:
+
+- **Sensors**: Online, Battery, Charging, Screen on, Current page, Profile, Kiosky
+  version, Last seen, Online last 7 days, Policy applied, Wi-Fi signal (off by default)
+- **Buttons**: Reload page, Back to start page, Identify, Take screenshot, Clear
+  cache, Restart Kiosky
+- **Services**: `kiosky_shepherd.show_message`, `kiosky_shepherd.open_page` and
+  `kiosky_shepherd.send_command`, targeting tablets by device
+
+It polls every 30 seconds, and tablets enrolled later appear on their own. Commands
+reach a tablet at its next check-in, so set a short check-in interval on profiles
+used for instant reactions. For example, when the doorbell rings:
+
+```yaml
+automation:
+  - alias: Doorbell on the hallway tablet
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.front_door_ding
+        to: "on"
+    actions:
+      - action: kiosky_shepherd.show_message
+        data:
+          device_id: <the hallway tablet's device id>
+          message: Someone is at the front door
+          seconds: 60
+```
 
 ## Single sign-on
 
@@ -267,30 +458,46 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | --- | --- | --- |
 | `GET /api/v1/admin/overview` | viewer | Fleet summary |
 | `GET /api/v1/admin/policy/schema` | viewer | Every policy key, type, default and help text |
-| `GET /api/v1/admin/devices` | viewer | `?q=&profile_id=&status=active\|retired\|all&online=1\|0` |
+| `GET /api/v1/admin/devices` | viewer | `?q=&profile_id=&tag=&status=active\|retired\|all&online=1\|0` |
 | `GET /api/v1/admin/devices/{id}` | viewer | One device |
-| `PATCH /api/v1/admin/devices/{id}` | operator | `{name, profile_id, notes, overrides: {key: value\|null}, clear_overrides}` |
+| `PATCH /api/v1/admin/devices/{id}` | operator | `{name, profile_id, notes, tags: [..], overrides: {key: value\|null}, clear_overrides}` |
 | `DELETE /api/v1/admin/devices/{id}` | operator | Retire (releases the tablet). `?purge=1` on a retired device deletes it (admin). |
 | `GET /api/v1/admin/devices/{id}/policy` | viewer | Effective policy and where each value comes from |
 | `GET /api/v1/admin/devices/{id}/events` | viewer | Event log |
 | `POST /api/v1/admin/devices/{id}/commands` | operator | `{type, params, ttl_hours}` |
+| `POST /api/v1/admin/devices/{id}/watch` | viewer | Ask the device to check in every `fast_checkin_seconds` for the next 2 minutes |
+| `GET /api/v1/admin/devices/{id}/history` | viewer | `?days=7–90`: daily uptime, battery, Wi-Fi and page errors |
+| `GET /api/v1/admin/devices/{id}/live` | viewer | The latest live-view frame (404 when none in the last minute) |
+| `GET /api/v1/admin/tags` | viewer | Tags in use, with device counts |
+| `POST /api/v1/admin/device-tags` | operator | Bulk: `{device_ids, add: [..], remove: [..]}` |
 | `GET /api/v1/admin/commands/types` | viewer | Command types and parameters |
-| `GET /api/v1/admin/commands` | viewer | `?device_id=&status=` |
-| `POST /api/v1/admin/commands` | operator | Bulk: `{type, params, device_ids \| profile_id \| all: true}` |
+| `GET /api/v1/admin/commands` | viewer | `?device_id=&status=&type=&has_attachment=1` |
+| `POST /api/v1/admin/commands` | operator | Bulk: `{type, params, device_ids \| profile_id \| tag \| all: true}` |
 | `DELETE /api/v1/admin/commands/{id}` | operator | Cancel a pending command |
 | `GET /api/v1/admin/commands/{id}/screenshot` | viewer | Screenshot image |
 | `GET/POST /api/v1/admin/profiles` | viewer / admin | List, create `{name, description, settings}` |
 | `GET/PATCH/DELETE /api/v1/admin/profiles/{id}` | viewer / admin | `settings` patches merge; `null` removes a key. Delete takes `?move_to=`. |
+| `GET /api/v1/admin/profiles/export`, `…/profiles/{id}/export` | admin | Download profiles as JSON (PINs only as hashes) |
+| `POST /api/v1/admin/profiles/import` | admin | An export file; creates new profiles, renaming on a clash, and lists skipped unknown settings |
+| `GET /api/v1/admin/profiles/{id}/versions` | viewer | Saved versions, newest first, each with its changes |
+| `POST /api/v1/admin/profiles/{id}/versions/{version}/restore` | admin | Put the profile back to that version |
+| `GET/POST /api/v1/admin/schedules` | viewer / operator | `{name, type, params, target: {all\|profile_id\|tag\|device_ids}, days: ["mon",…], time: "HH:MM", timezone, ttl_hours, enabled}`. `type: "set_profile"` with `params: {profile_id}` moves devices instead of sending a command. |
+| `PATCH/DELETE /api/v1/admin/schedules/{id}` | operator | Any of the fields above / delete |
+| `POST /api/v1/admin/schedules/{id}/run` | operator | Queue it now |
 | `GET/POST /api/v1/admin/enrollment-tokens` | operator | `{profile_id, label, name_prefix, expires_hours, max_uses}` |
 | `DELETE /api/v1/admin/enrollment-tokens/{id}` | operator | Revoke |
 | `GET /api/v1/admin/releases` | viewer | Uploaded APKs |
 | `POST /api/v1/admin/releases` | admin | multipart: `apk`, `notes` |
 | `PATCH/DELETE /api/v1/admin/releases/{id}` | admin | `{active, notes}` / delete |
-| `GET/POST/PATCH/DELETE /api/v1/admin/users[/{id}]` | admin | Console users |
+| `GET /api/v1/admin/releases/rings` | viewer | Release rings (staged rollouts) and their progress |
+| `PUT/DELETE /api/v1/admin/releases/rings/{tag}` | admin | `{release: "latest" \| "1.2.0"}` / remove |
+| `GET/POST/PATCH/DELETE /api/v1/admin/users[/{id}]` | admin | Console users. `PATCH {reset_2fa: true}` turns off someone's two-factor sign-in; `scope_tags: [..] \| null` limits a user to devices with those tags. |
 | `GET/POST/DELETE /api/v1/admin/tokens[/{id}]` | viewer+ | API tokens (created from the console only) |
 | `GET /api/v1/admin/audit` | admin | `?before=&target_type=&target_id=` |
 | `GET /api/v1/admin/login-options` | none | Whether password sign-in is on, and the single sign-on providers |
 | `POST /api/v1/admin/migrate` | admin | Apply pending database migrations; `GET …/session` lists them under `server.pending_migrations` |
+| `POST /api/v1/admin/alerts/test` | admin | Send a test message to every alert channel |
+| `POST /api/v1/admin/session/2fa[/setup\|/enable\|/disable\|/recovery]` | console only | Second sign-in step, and managing your own two-factor sign-in |
 
 Example: reload every tablet in profile 3.
 
@@ -308,7 +515,12 @@ The device API (`/api/v1/device/…`) is documented in [docs/PROTOCOL.md](docs/P
   (SHA-256 for random tokens, bcrypt/argon via `password_hash` for passwords).
 - The console uses a `SameSite=Strict`, `HttpOnly`, `Secure` session cookie, plus
   a CSRF token on every change. Its CSP allows only same-origin scripts and styles.
-- Logins, enrollment and first-run setup are rate-limited per IP (and per username for logins).
+- Logins, two-factor codes, enrollment and first-run setup are rate-limited per IP
+  (and per user). Each device is limited to 120 check-ins and 300 command results
+  per 10 minutes and 30 APK downloads an hour.
+- Two-factor sign-in uses standard TOTP (RFC 6238). Each code works once, and
+  recovery codes are stored only as SHA-256 hashes. The TOTP secret itself has to
+  be stored as it is, so protect database backups.
 - Single sign-on uses the authorization code flow with PKCE, `state` and `nonce`.
   Each pending sign-in is single-use, expires after 10 minutes, and is bound to
   the browser that started it by a `SameSite=Lax` cookie limited to `/sso/`.

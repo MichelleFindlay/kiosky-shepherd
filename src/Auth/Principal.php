@@ -18,7 +18,15 @@ final class Principal
         public readonly string $role,      // viewer | operator | admin | device
         public readonly string $ip,
         public readonly ?int $adminId = null, // the admin behind a session or token
+        /** @var list<string>|null tags limiting which devices this user sees; null for all */
+        public readonly ?array $scopeTags = null,
     ) {
+    }
+
+    /** True when this user may only see devices with one of $scopeTags. */
+    public function isScoped(): bool
+    {
+        return $this->scopeTags !== null;
     }
 
     public function can(string $role): bool

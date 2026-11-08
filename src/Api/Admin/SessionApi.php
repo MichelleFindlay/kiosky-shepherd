@@ -8,6 +8,7 @@ use Shepherd\Audit;
 use Shepherd\Auth\AdminAuth;
 use Shepherd\Auth\OidcProvider;
 use Shepherd\Auth\Principal;
+use Shepherd\Auth\Totp;
 use Shepherd\Config;
 use Shepherd\Db;
 use Shepherd\Migrator;
@@ -33,14 +34,165 @@ final class SessionApi
         RateLimiter::hit('login-user:' . strtolower($username), 10, 900);
 
         try {
-            [$p, $csrf] = AdminAuth::login($req, $username, $password);
+            $admin = AdminAuth::verifyPassword($username, $password);
         } catch (HttpError $e) {
             Audit::log(null, 'admin.login_failed', 'admin', null, ['username' => mb_substr($username, 0, 64)], $req->ip());
             throw $e;
         }
         RateLimiter::clear('login-user:' . strtolower($username));
+        if (AdminAuth::hasTotp($admin)) {
+            AdminAuth::beginSecondFactor($req, $admin);
+            return Response::json(['two_factor_required' => true]);
+        }
+        [$p, $csrf] = AdminAuth::establish($req, $admin);
         Audit::log($p, 'admin.login', 'admin', $p->id);
         return Response::json(self::sessionInfo($p, $csrf));
+    }
+
+    /** POST /api/v1/admin/session/2fa  {code}: the second step of a password sign-in */
+    public static function secondFactor(Request $req): Response
+    {
+        $id = AdminAuth::pendingSecondFactor($req);
+        if ($id === null) {
+            throw new HttpError(401, 'two_factor_expired', 'The sign-in took too long. Enter your password again.');
+        }
+        RateLimiter::hit('2fa-ip:' . $req->ip(), 30, 900);
+        RateLimiter::hit('2fa-user:' . $id, 10, 900);
+        $code = trim((string) $req->input('code', ''));
+
+        $admin = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $id]);
+        if ($admin === null || (int) $admin['disabled'] === 1 || !AdminAuth::hasTotp($admin)) {
+            throw new HttpError(401, 'two_factor_expired', 'The sign-in took too long. Enter your password again.');
+        }
+        $via = self::checkSecondFactor($admin, $code);
+        if ($via === null) {
+            Audit::log(null, 'admin.2fa_failed', 'admin', $id, ['username' => $admin['username']], $req->ip());
+            throw new HttpError(401, 'two_factor_failed', 'That code is wrong or has already been used.');
+        }
+        RateLimiter::clear('2fa-user:' . $id);
+        [$p, $csrf] = AdminAuth::establish($req, $admin);
+        Audit::log($p, 'admin.login', 'admin', $p->id, ['via' => $via]);
+        return Response::json(self::sessionInfo($p, $csrf));
+    }
+
+    /**
+     * Accepts a TOTP code (once per time step) or an unused recovery code (once).
+     *
+     * @return string|null 'totp' or 'recovery_code', or null when the code is wrong
+     */
+    private static function checkSecondFactor(array $admin, string $code): ?string
+    {
+        $id = (int) $admin['id'];
+        if (Totp::looksLikeRecoveryCode($code)) {
+            $hash = Totp::hashRecoveryCode($code);
+            return Db::transaction(static function () use ($id, $hash): ?string {
+                $json = Db::value('SELECT totp_recovery FROM admins WHERE id = :id FOR UPDATE', ['id' => $id]);
+                $left = Db::decode(is_string($json) ? $json : null);
+                $i = array_search($hash, $left, true);
+                if ($i === false) {
+                    return null;
+                }
+                array_splice($left, (int) $i, 1);
+                Db::update('admins', ['totp_recovery' => Db::json(array_values($left))], ['id' => $id]);
+                return 'recovery_code';
+            });
+        }
+        $last = $admin['totp_last_step'] === null ? null : (int) $admin['totp_last_step'];
+        $step = Totp::verify((string) $admin['totp_secret'], $code, $last);
+        if ($step === null) {
+            return null;
+        }
+        // Conditional update, so two requests racing with the same code can't both win
+        $n = Db::run('UPDATE admins SET totp_last_step = :s WHERE id = :id AND (totp_last_step IS NULL OR totp_last_step < :s2)',
+            ['s' => $step, 'id' => $id, 's2' => $step])->rowCount();
+        return $n === 1 ? 'totp' : null;
+    }
+
+    /** The signed-in password user, for managing their own two-factor sign-in. */
+    private static function passwordUser(Request $req): array
+    {
+        $p = AdminAuth::require($req);
+        if ($p->type !== 'admin') {
+            throw HttpError::forbidden('Manage two-factor sign-in from the web console, not with an API token.');
+        }
+        $admin = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $p->id]) ?? throw HttpError::unauthorized();
+        if ($admin['password_hash'] === null) {
+            throw HttpError::conflict('You sign in with single sign-on. Set up two-factor sign-in with your identity provider.');
+        }
+        return [$p, $admin];
+    }
+
+    /** POST /api/v1/admin/session/2fa/setup  starts setup: a new secret to scan, not saved yet */
+    public static function totpSetup(Request $req): Response
+    {
+        [, $admin] = self::passwordUser($req);
+        Migrator::requireTable('device_tags'); // the 1.3.0 migration also adds the TOTP columns
+        if (AdminAuth::hasTotp($admin)) {
+            throw HttpError::conflict('Two-factor sign-in is already on. Turn it off first to move to a new app.');
+        }
+        $secret = Totp::newSecret();
+        $_SESSION['totp_setup'] = $secret;
+        $issuer = (string) Config::get('organisation', '') !== '' ? 'Kiosky Shepherd (' . Config::get('organisation') . ')' : 'Kiosky Shepherd';
+        return Response::json(['secret' => $secret, 'uri' => Totp::uri($secret, (string) $admin['username'], $issuer)]);
+    }
+
+    /** POST /api/v1/admin/session/2fa/enable  {code}: confirms the app works, turns 2FA on, returns recovery codes once */
+    public static function totpEnable(Request $req): Response
+    {
+        [$p, $admin] = self::passwordUser($req);
+        $secret = $_SESSION['totp_setup'] ?? null;
+        if (!is_string($secret)) {
+            throw HttpError::conflict('Start the setup again.');
+        }
+        if (AdminAuth::hasTotp($admin)) {
+            throw HttpError::conflict('Two-factor sign-in is already on.');
+        }
+        RateLimiter::hit('2fa-user:' . $p->id, 10, 900);
+        $step = Totp::verify($secret, (string) $req->input('code', ''), null);
+        if ($step === null) {
+            throw HttpError::validation(['code' => 'That code doesn\'t match. Check the time on your phone is set automatically.']);
+        }
+        $codes = Totp::newRecoveryCodes();
+        Db::update('admins', [
+            'totp_secret' => $secret,
+            'totp_last_step' => $step,
+            'totp_recovery' => Db::json(array_map([Totp::class, 'hashRecoveryCode'], $codes)),
+        ], ['id' => $p->id]);
+        unset($_SESSION['totp_setup']);
+        Audit::log($p, 'admin.2fa_enabled', 'admin', $p->id);
+        return Response::json(['recovery_codes' => $codes]);
+    }
+
+    /** POST /api/v1/admin/session/2fa/disable  {password} */
+    public static function totpDisable(Request $req): Response
+    {
+        [$p, $admin] = self::passwordUser($req);
+        self::confirmPassword($admin, $req);
+        Db::update('admins', ['totp_secret' => null, 'totp_last_step' => null, 'totp_recovery' => null], ['id' => $p->id]);
+        Audit::log($p, 'admin.2fa_disabled', 'admin', $p->id);
+        return Response::json(['ok' => true]);
+    }
+
+    /** POST /api/v1/admin/session/2fa/recovery  {password}: replaces the recovery codes */
+    public static function totpRecovery(Request $req): Response
+    {
+        [$p, $admin] = self::passwordUser($req);
+        if (!AdminAuth::hasTotp($admin)) {
+            throw HttpError::conflict('Two-factor sign-in is off.');
+        }
+        self::confirmPassword($admin, $req);
+        $codes = Totp::newRecoveryCodes();
+        Db::update('admins', ['totp_recovery' => Db::json(array_map([Totp::class, 'hashRecoveryCode'], $codes))], ['id' => $p->id]);
+        Audit::log($p, 'admin.2fa_recovery_codes', 'admin', $p->id);
+        return Response::json(['recovery_codes' => $codes]);
+    }
+
+    private static function confirmPassword(array $admin, Request $req): void
+    {
+        RateLimiter::hit('login-user:' . strtolower((string) $admin['username']), 10, 900);
+        if (!password_verify((string) $req->input('password', ''), (string) $admin['password_hash'])) {
+            throw HttpError::validation(['password' => 'That is not your password.']);
+        }
     }
 
     /** GET /api/v1/admin/session */
@@ -54,9 +206,16 @@ final class SessionApi
     private static function sessionInfo(Principal $p, ?string $csrf): array
     {
         $sso = $p->type === 'admin' ? AdminAuth::sessionSsoProvider() : null;
-        $server = ['version' => SHEPHERD_VERSION];
+        $server = ['version' => SHEPHERD_VERSION, 'cron' => OverviewApi::cronStatus()];
         if ($p->can('admin')) {
             $server['pending_migrations'] = Migrator::pending();
+        }
+        $twoFactor = null;
+        $recoveryLeft = null;
+        if ($p->type === 'admin') {
+            $row = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $p->id]) ?? [];
+            $twoFactor = AdminAuth::hasTotp($row);
+            $recoveryLeft = $twoFactor ? count(Db::decode($row['totp_recovery'] ?? null)) : null;
         }
         return [
             'user' => [
@@ -65,6 +224,9 @@ final class SessionApi
                 'role' => $p->role,
                 'via' => $p->type,
                 'sso' => $sso === null ? null : ['id' => $sso, 'label' => OidcProvider::labelFor($sso)],
+                'two_factor' => $twoFactor,
+                'scope_tags' => $p->scopeTags,
+                'recovery_codes_left' => $recoveryLeft,
             ],
             'csrf_token' => $csrf,
             'server' => $server,

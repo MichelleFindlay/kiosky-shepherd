@@ -1,0 +1,68 @@
+send_command:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: kiosky_shepherd
+          multiple: true
+    command:
+      required: true
+      example: reload
+      selector:
+        select:
+          options:
+            - reload
+            - go_home
+            - navigate
+            - restart_app
+            - clear_cache
+            - clear_web_data
+            - check_update
+            - show_message
+            - identify
+            - screenshot
+          custom_value: true
+    params:
+      required: false
+      example: '{"url": "https://example.com/"}'
+      selector:
+        object:
+
+show_message:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: kiosky_shepherd
+          multiple: true
+    message:
+      required: true
+      example: Someone is at the front door
+      selector:
+        text:
+          multiline: true
+    seconds:
+      required: false
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 3600
+          unit_of_measurement: s
+
+open_page:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: kiosky_shepherd
+          multiple: true
+    url:
+      required: true
+      example: https://ha.example.com/lovelace/cameras
+      selector:
+        text:
+          type: url

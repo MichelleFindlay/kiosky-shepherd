@@ -12,9 +12,10 @@ DirectoryIndex index.php index.html
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
     # Block code, config, data and dotfiles (each folder also has its own deny .htaccess)
-    RewriteRule ^(src|config|storage|sql|bin|docs)(/|$) - [F,L]
+    RewriteRule ^(src|config|storage|sql|bin|docs|tests|custom_components)(/|$) - [F,L]
     RewriteRule (^|/)\.(?!well-known/) - [F,L]
-    RewriteRule \.(md|sql|log|dist|example\.php)$ - [F,L,NC]
+    RewriteRule \.(md|sql|log|dist|neon|yml|yaml|py|example\.php)$ - [F,L,NC]
+    RewriteRule ^hacs\.json$ - [F,L]
 
     # Serve the console's static files directly, send everything else to index.php
     RewriteCond %{REQUEST_FILENAME} !-f
@@ -22,7 +23,7 @@ DirectoryIndex index.php index.html
     RewriteRule ^ index.php [L]
 </IfModule>
 
-<FilesMatch "^(\.|.*\.(md|sql|log)$|LICENSE$)">
+<FilesMatch "^(\.|.*\.(md|sql|log|dist|neon|yml|yaml|py)$|LICENSE$|hacs\.json$)">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>

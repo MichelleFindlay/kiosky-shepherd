@@ -9,6 +9,8 @@ use Shepherd\Auth\AdminAuth;
 use Shepherd\Auth\OidcProvider;
 use Shepherd\Auth\Principal;
 use Shepherd\Db;
+use Shepherd\Devices;
+use Shepherd\Migrator;
 use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
@@ -28,6 +30,8 @@ final class UsersApi
             // The identity provider sets this user's role at every sign-in
             'role_managed' => $sso !== null && (OidcProvider::find($sso)?->managesRoles() ?? false),
             'role' => $u['role'],
+            'two_factor' => AdminAuth::hasTotp($u),
+            'scope_tags' => AdminAuth::scopeOf($u),
             'disabled' => (bool) $u['disabled'],
             'created_at' => Util::iso($u['created_at']),
             'last_login_at' => Util::iso($u['last_login_at']),
@@ -42,7 +46,24 @@ final class UsersApi
         return Response::json(array_map(static fn ($u) => self::presentUser($u), $rows));
     }
 
-    /** POST /api/v1/admin/users  {username, password, role} */
+    /**
+     * scope_tags from a request body: a list of tags, or null/[] for every device.
+     *
+     * @return list<string>|null
+     */
+    private static function scopeInput(mixed $v): ?array
+    {
+        if ($v === null) {
+            return null;
+        }
+        $tags = Devices::validateTags($v, 'scope_tags');
+        if ($tags !== []) {
+            Migrator::requireTable('profile_versions'); // the 1.4.0 migration adds admins.scope_tags
+        }
+        return $tags === [] ? null : $tags;
+    }
+
+    /** POST /api/v1/admin/users  {username, password, role, scope_tags?} */
     public static function create(Request $req): Response
     {
         $p = AdminAuth::require($req, 'admin');
@@ -62,12 +83,16 @@ final class UsersApi
         if ($errors !== []) {
             throw HttpError::validation($errors);
         }
+        $scope = self::scopeInput($req->input('scope_tags'));
+        if ($scope !== null && $role === 'admin') {
+            throw HttpError::validation(['scope_tags' => 'Admins always see every device. Choose operator or viewer.']);
+        }
         try {
             $id = Db::insert('admins', [
                 'username' => $username,
                 'password_hash' => password_hash($password, PASSWORD_DEFAULT),
                 'role' => $role,
-            ]);
+            ] + ($scope !== null ? ['scope_tags' => Db::json($scope)] : []));
         } catch (\PDOException $e) {
             if ($e->getCode() === '23000') {
                 throw HttpError::validation(['username' => 'That username is taken.']);
@@ -78,7 +103,7 @@ final class UsersApi
         return Response::json(self::presentUser(Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $id])), 201);
     }
 
-    /** PATCH /api/v1/admin/users/{id}  {role?, password?, disabled?} */
+    /** PATCH /api/v1/admin/users/{id}  {role?, password?, disabled?, reset_2fa?: true, scope_tags?: [..] | null} */
     public static function update(Request $req): Response
     {
         $p = AdminAuth::require($req, 'admin');
@@ -114,6 +139,21 @@ final class UsersApi
                 $changes['password_hash'] = password_hash($b['password'], PASSWORD_DEFAULT);
             }
         }
+        if (array_key_exists('scope_tags', $b)) {
+            $scope = self::scopeInput($b['scope_tags']);
+            if ($scope !== null && ($changes['role'] ?? $user['role']) === 'admin') {
+                $errors['scope_tags'] = 'Admins always see every device. Make them an operator or viewer first.';
+            } elseif ($scope !== null || array_key_exists('scope_tags', $user)) {
+                $changes['scope_tags'] = $scope === null ? null : Db::json($scope);
+            }
+        }
+        if (($b['reset_2fa'] ?? null) === true) {
+            if ($id === $p->adminId) {
+                $errors['reset_2fa'] = 'Turn off your own two-factor sign-in under Your account.';
+            } elseif (AdminAuth::hasTotp($user)) {
+                $changes += ['totp_secret' => null, 'totp_last_step' => null, 'totp_recovery' => null];
+            }
+        }
         if ($errors !== []) {
             throw HttpError::validation($errors);
         }
@@ -129,6 +169,10 @@ final class UsersApi
             $logged = $changes;
             if (isset($logged['password_hash'])) {
                 $logged['password_hash'] = 'changed';
+            }
+            if (array_key_exists('totp_secret', $logged)) {
+                unset($logged['totp_secret'], $logged['totp_last_step'], $logged['totp_recovery']);
+                $logged['two_factor'] = 'reset';
             }
             Audit::log($p, 'user.updated', 'admin', $id, $logged);
         }

@@ -63,6 +63,24 @@ final class Policy
             'default' => 'auto', 'group' => 'Device', 'label' => 'Screen orientation', 'help' => '',
         ],
 
+        // --- Screen schedule (needs Kiosky support, see docs/PROTOCOL.md §5.2) -----
+        'screen.off_at' => [
+            'type' => 'time', 'default' => '', 'group' => 'Screen schedule', 'label' => 'Turn the screen off at',
+            'help' => 'Tablet\'s local time, e.g. 22:00. Leave empty to never turn it off. Needs a Kiosky version that supports the screen schedule.',
+        ],
+        'screen.on_at' => [
+            'type' => 'time', 'default' => '', 'group' => 'Screen schedule', 'label' => 'Turn the screen back on at',
+            'help' => 'e.g. 07:00. Used only when "off at" is set; it may be earlier than the off time (overnight).',
+        ],
+        'screen.wake_on_touch' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Screen schedule', 'label' => 'A touch wakes the screen',
+            'help' => 'While the screen is off for the schedule, touching it turns it on for a few minutes.',
+        ],
+        'screen.wake_minutes' => [
+            'type' => 'int', 'min' => 1, 'max' => 120, 'default' => 5, 'group' => 'Screen schedule',
+            'label' => 'Stay on after a touch (minutes)', 'help' => '',
+        ],
+
         // --- Lockdown -----------------------------------------------------------
         'toolbar.mode' => [
             'type' => 'enum', 'values' => ['hidden', 'limited', 'full'], 'default' => 'hidden', 'group' => 'Lockdown',
@@ -198,6 +216,13 @@ final class Policy
                     return null;
                 }
                 return $v;
+
+            case 'time':
+                if (!is_string($v) || !preg_match('/^(([01]\d|2[0-3]):[0-5]\d)?$/', trim($v))) {
+                    $err = 'Use a 24-hour time such as 22:00, or leave it empty.';
+                    return null;
+                }
+                return trim($v);
 
             case 'enum':
                 if (!is_string($v) || !in_array($v, $def['values'], true)) {
@@ -351,11 +376,30 @@ final class Policy
     /** Effective policy for a device row, in the nested form sent to the app. */
     public static function forDevice(array $device): array
     {
+        return self::toDevice(self::resolveForDevice($device)['values']);
+    }
+
+    /**
+     * resolve() for a device row, plus release rings: unless the device itself
+     * overrides updates.release, a tag with a ring (Releases::rings) sets it, and
+     * its source reads "tag:<name>".
+     *
+     * @return array{values: array<string, mixed>, sources: array<string, string>}
+     */
+    public static function resolveForDevice(array $device): array
+    {
         $resolved = self::resolve(
             self::profileSettings((int) $device['profile_id']),
             Db::decode($device['overrides'] ?? null)
         );
-        return self::toDevice($resolved['values']);
+        if ($resolved['sources']['updates.release'] !== 'device' && Releases::rings() !== []) {
+            $ring = Releases::ringFor(Devices::tagsOf($device));
+            if ($ring !== null) {
+                $resolved['values']['updates.release'] = $ring['release'];
+                $resolved['sources']['updates.release'] = 'tag:' . $ring['tag'];
+            }
+        }
+        return $resolved;
     }
 
     /** @var array<int, array<string, mixed>> per-request cache */

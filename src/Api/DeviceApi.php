@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace Shepherd\Api;
 
+use Shepherd\Api\Admin\DevicesApi;
 use Shepherd\Audit;
 use Shepherd\Auth\DeviceAuth;
 use Shepherd\Auth\Principal;
 use Shepherd\Commands;
 use Shepherd\Config;
 use Shepherd\Db;
+use Shepherd\Devices;
+use Shepherd\Health;
 use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
@@ -119,6 +122,8 @@ final class DeviceApi
     public static function checkin(Request $req): Response
     {
         [, $device] = DeviceAuth::require($req);
+        // Normal use is one check-in per checkin_seconds (≥ 15 s) plus one after each command
+        RateLimiter::hit('dev-checkin:' . $device['uid'], 120, 600);
         $deviceId = (int) $device['id'];
         $body = $req->json();
 
@@ -162,12 +167,16 @@ final class DeviceApi
 
         // Events the app queued since its last check-in (page errors, update results…)
         $events = $body['events'] ?? [];
+        $pageErrors = 0;
         if (is_array($events) && array_is_list($events)) {
             foreach (array_slice($events, 0, 50) as $e) {
                 if (!is_array($e) || !is_string($e['type'] ?? null)) {
                     continue;
                 }
                 $type = preg_replace('/[^a-z0-9_.]/', '', strtolower($e['type'])) ?: 'unknown';
+                if ($type === 'page_error') {
+                    $pageErrors++;
+                }
                 $data = ['at' => Util::clip($e['at'] ?? null, 40), 'data' => $e['data'] ?? null];
                 $json = Db::json($data);
                 if (strlen($json) > 4096) {
@@ -177,20 +186,41 @@ final class DeviceApi
             }
         }
 
+        // Daily health summary. Never let it break a check-in.
+        try {
+            Health::record($device, $status, $pageErrors);
+        } catch (\Throwable $e) {
+            error_log('[kiosky-shepherd] health record for device ' . $deviceId . ': ' . $e->getMessage());
+        }
+
         return Response::json([
             'server_time' => gmdate('c'),
             'device' => ['id' => $device['uid'], 'name' => $device['name']],
             'policy' => $policy,
             'update' => Releases::targetFor($policy),
             'commands' => Commands::deliver($deviceId),
-            'checkin_seconds' => (int) $policy['checkin_seconds'],
+            'checkin_seconds' => self::nextCheckin($device, (int) $policy['checkin_seconds']),
         ]);
+    }
+
+    /**
+     * Seconds until the next check-in. Shorter than the policy's interval while an admin
+     * has the device page open (fast_checkin_until), so commands arrive quickly.
+     */
+    private static function nextCheckin(array $device, int $policySeconds): int
+    {
+        $fast = $device['fast_checkin_until'] ?? null; // column added by the 1.3.0 migration
+        if (is_string($fast) && strtotime($fast . ' UTC') > time()) {
+            return min($policySeconds, DevicesApi::fastSeconds());
+        }
+        return $policySeconds;
     }
 
     /** POST /api/v1/device/commands/{id}/result */
     public static function commandResult(Request $req): Response
     {
         [, $device] = DeviceAuth::require($req);
+        RateLimiter::hit('dev-result:' . $device['uid'], 300, 600);
         $id = $req->intParam('id');
         $cmd = Db::one('SELECT * FROM commands WHERE id = :id AND device_id = :d',
             ['id' => $id, 'd' => (int) $device['id']]);
@@ -231,20 +261,7 @@ final class DeviceApi
 
     private static function saveScreenshot(int $commandId, string $b64): string
     {
-        $max = (int) Config::get('max_screenshot_mb', 4) * 1024 * 1024;
-        if (strlen($b64) > $max * 4 / 3 + 16) {
-            throw new HttpError(413, 'too_large', 'The screenshot is too large.');
-        }
-        $bin = base64_decode($b64, true);
-        if ($bin === false) {
-            throw HttpError::validation(['screenshot' => 'Must be base64.']);
-        }
-        $ext = match (true) {
-            str_starts_with($bin, "\xFF\xD8\xFF") => 'jpg',
-            str_starts_with($bin, "\x89PNG\r\n\x1A\n") => 'png',
-            str_starts_with($bin, 'RIFF') && substr($bin, 8, 4) === 'WEBP' => 'webp',
-            default => throw HttpError::validation(['screenshot' => 'Send a JPEG, PNG or WebP image.']),
-        };
+        [$bin, $ext] = self::decodeImage($b64);
         $dir = Config::storage('screenshots');
         if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
             throw new \RuntimeException("Cannot create $dir");
@@ -256,10 +273,54 @@ final class DeviceApi
         return $name;
     }
 
+    /**
+     * Base64 image → [binary, extension]. Only JPEG, PNG and WebP are accepted, checked
+     * by their magic bytes, so nothing else can be stored or served back.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private static function decodeImage(string $b64): array
+    {
+        $max = (int) Config::get('max_screenshot_mb', 4) * 1024 * 1024;
+        if (strlen($b64) > $max * 4 / 3 + 16) {
+            throw new HttpError(413, 'too_large', 'The image is too large.');
+        }
+        $bin = base64_decode($b64, true);
+        if ($bin === false) {
+            throw HttpError::validation(['screenshot' => 'Must be base64.']);
+        }
+        $ext = match (true) {
+            str_starts_with($bin, "\xFF\xD8\xFF") => 'jpg',
+            str_starts_with($bin, "\x89PNG\r\n\x1A\n") => 'png',
+            str_starts_with($bin, 'RIFF') && substr($bin, 8, 4) === 'WEBP' => 'webp',
+            default => throw HttpError::validation(['screenshot' => 'Send a JPEG, PNG or WebP image.']),
+        };
+        return [$bin, $ext];
+    }
+
+    /**
+     * POST /api/v1/device/live  {"screenshot": "<base64>"}
+     * A live-view frame, sent every few seconds while a live_view command runs. Each
+     * frame replaces the previous one; nothing is kept.
+     */
+    public static function liveFrame(Request $req): Response
+    {
+        [, $device] = DeviceAuth::require($req);
+        RateLimiter::hit('dev-live:' . $device['uid'], 700, 600); // up to one frame a second
+        $shot = $req->input('screenshot');
+        if (!is_string($shot) || $shot === '') {
+            throw HttpError::validation(['screenshot' => 'Send the frame as base64.']);
+        }
+        [$bin, $ext] = self::decodeImage($shot);
+        Devices::saveLiveFrame((int) $device['id'], $bin, $ext);
+        return Response::json(['ok' => true]);
+    }
+
     /** GET /api/v1/device/releases/{id}/download */
     public static function downloadRelease(Request $req): Response
     {
-        DeviceAuth::require($req);
+        [, $device] = DeviceAuth::require($req);
+        RateLimiter::hit('dev-download:' . $device['uid'], 30, 3600);
         $rel = Db::one('SELECT * FROM releases WHERE id = :id', ['id' => $req->intParam('id')]);
         if ($rel === null) {
             throw HttpError::notFound('Release');

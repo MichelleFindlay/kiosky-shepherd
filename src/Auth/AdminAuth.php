@@ -14,7 +14,8 @@ use Shepherd\Http\Request;
  *  - Session cookie (the web console). State-changing requests must send the
  *    session's CSRF token in an X-CSRF-Token header.
  *  - API token: "Authorization: Bearer shp_…" for scripts and integrations.
- * Console sessions are started by a password (login) or by single sign-on (Sso).
+ * Console sessions are started by a password (login), optionally followed by a
+ * TOTP or recovery code (two-factor sign-in), or by single sign-on (Sso).
  */
 final class AdminAuth
 {
@@ -71,7 +72,7 @@ final class AdminAuth
         if (!is_int($adminId)) {
             return null;
         }
-        $admin = Db::one('SELECT id, username, role, disabled FROM admins WHERE id = :id', ['id' => $adminId]);
+        $admin = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => $adminId]);
         if ($admin === null || (int) $admin['disabled'] === 1) {
             $_SESSION = [];
             return null;
@@ -83,7 +84,26 @@ final class AdminAuth
             }
         }
         return new Principal('admin', (int) $admin['id'], (string) $admin['username'], (string) $admin['role'],
-            $req->ip(), (int) $admin['id']);
+            $req->ip(), (int) $admin['id'], self::scopeOf($admin));
+    }
+
+    /**
+     * Device tags an admins row is limited to, or null for every device. Admins are never
+     * limited. Works before the 1.4.0 migration adds the column (no column: no limit).
+     *
+     * @return list<string>|null
+     */
+    public static function scopeOf(array $admin): ?array
+    {
+        if (($admin['role'] ?? null) === 'admin') {
+            return null;
+        }
+        $tags = Db::decode(is_string($admin['scope_tags'] ?? null) ? $admin['scope_tags'] : null, null);
+        if (!is_array($tags)) {
+            return null;
+        }
+        $tags = array_values(array_filter($tags, [\Shepherd\Devices::class, 'isTag']));
+        return $tags === [] ? null : $tags;
     }
 
     private static function fromToken(Request $req, string $token): Principal
@@ -109,15 +129,31 @@ final class AdminAuth
         if ((Principal::ROLES[$role] ?? 0) > (Principal::ROLES[$row['admin_role']] ?? 0)) {
             $role = (string) $row['admin_role'];
         }
+        // …and is limited to the same devices
+        $owner = Db::one('SELECT * FROM admins WHERE id = :id', ['id' => (int) $row['admin_id']]) ?? [];
         return new Principal('token', (int) $row['id'], 'token:' . $row['name'], $role, $req->ip(),
-            (int) $row['admin_id']);
+            (int) $row['admin_id'], self::scopeOf($owner));
     }
 
-    /** @return array{0: Principal, 1: string} principal and CSRF token */
+    /**
+     * Checks a username and password and starts a session (no second factor).
+     *
+     * @return array{0: Principal, 1: string} principal and CSRF token
+     */
     public static function login(Request $req, string $username, string $password): array
     {
-        $admin = Db::one('SELECT id, username, password_hash, role, disabled FROM admins WHERE username = :u',
-            ['u' => $username]);
+        return self::establish($req, self::verifyPassword($username, $password));
+    }
+
+    /**
+     * Returns the admins row for a correct username and password, or throws 401.
+     * Uses SELECT * so it keeps working before the 1.3.0 migration adds the TOTP columns.
+     *
+     * @return array<string, mixed>
+     */
+    public static function verifyPassword(string $username, string $password): array
+    {
+        $admin = Db::one('SELECT * FROM admins WHERE username = :u', ['u' => $username]);
 
         // Verify against a dummy hash when the user doesn't exist (or signs in with single
         // sign-on and has no password), so timing doesn't leak usernames
@@ -129,7 +165,35 @@ final class AdminAuth
         if (password_needs_rehash($hash, PASSWORD_DEFAULT)) {
             Db::update('admins', ['password_hash' => password_hash($password, PASSWORD_DEFAULT)], ['id' => $admin['id']]);
         }
-        return self::establish($req, $admin);
+        return $admin;
+    }
+
+    /** Whether this admins row has two-factor sign-in turned on. */
+    public static function hasTotp(array $admin): bool
+    {
+        return is_string($admin['totp_secret'] ?? null) && $admin['totp_secret'] !== '';
+    }
+
+    /**
+     * The password was right but a TOTP or recovery code is still needed. The session
+     * remembers who for five minutes; it is not signed in until the code is checked.
+     */
+    public static function beginSecondFactor(Request $req, array $admin): void
+    {
+        self::startSession($req);
+        session_regenerate_id(true);
+        $_SESSION = ['seen' => time(), 'pending_2fa' => ['id' => (int) $admin['id'], 'at' => time()]];
+    }
+
+    /** Admin id waiting for its second factor in this session, or null. */
+    public static function pendingSecondFactor(Request $req): ?int
+    {
+        self::startSession($req);
+        $p = $_SESSION['pending_2fa'] ?? null;
+        if (!is_array($p) || !is_int($p['id'] ?? null) || time() - (int) ($p['at'] ?? 0) > 300) {
+            return null;
+        }
+        return $p['id'];
     }
 
     /**
@@ -151,7 +215,7 @@ final class AdminAuth
         }
 
         $p = new Principal('admin', (int) $admin['id'], (string) $admin['username'], (string) $admin['role'],
-            $req->ip(), (int) $admin['id']);
+            $req->ip(), (int) $admin['id'], self::scopeOf($admin));
         return [$p, $_SESSION['csrf']];
     }
 

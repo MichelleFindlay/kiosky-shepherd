@@ -76,6 +76,11 @@ return [
         // ],
     ],
 
+    // Apply database updates automatically on the first request after you upload
+    // a new version. Set false to apply them yourself with the console's Update
+    // database button or php bin/migrate.php (e.g. to take a backup first).
+    'auto_migrate' => true,
+
     // Set false to allow only single sign-on in the console. Keep at least one
     // working sign-in method: API tokens keep working either way.
     'password_login' => true,
@@ -92,4 +97,28 @@ return [
     'command_ttl_hours' => 24,          // queued commands expire after this
     'command_redeliver_seconds' => 300, // resend a delivered command if no result arrives
     'retention_days' => 90,             // bin/cron.php prunes events, audit and old commands
+
+    // Default time zone for new scheduled commands, e.g. 'Europe/London'
+    'timezone' => 'UTC',
+
+    // While someone has a device's page open, it is asked to check in this often (10–60 s)
+    'fast_checkin_seconds' => 15,
+
+    // ---- Offline alerts (optional) -------------------------------------------
+    // bin/cron.php sends one message when devices go offline and one when they
+    // come back. Use any mix of email and webhooks; the Overview page has a
+    // "Send test alert" button. Devices with an ignored tag are never reported.
+    'alerts' => [
+        'offline_minutes' => 15,          // how long without a check-in counts as offline
+        'ignore_tags' => ['no-alerts'],
+        // 'email' => ['it@example.com'], // sent with PHP mail()
+        // 'email_from' => 'kiosks@example.com',
+        'webhooks' => [
+            // ['type' => 'slack',   'url' => 'https://hooks.slack.com/services/…'], // also Mattermost, Rocket.Chat
+            // ['type' => 'teams',   'url' => 'https://…logic.azure.com/…'],        // Teams Workflows webhook
+            // ['type' => 'discord', 'url' => 'https://discord.com/api/webhooks/…'],
+            // ['type' => 'ntfy',    'url' => 'https://ntfy.sh/your-secret-topic'],
+            // ['type' => 'json',    'url' => 'https://example.com/hook', 'headers' => ['Authorization' => 'Bearer …']],
+        ],
+    ],
 ];

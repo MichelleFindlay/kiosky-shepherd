@@ -27,6 +27,13 @@ final class Commands
         'identify' => ['label' => 'Identify (show name on screen)', 'params' => [
             'seconds' => ['type' => 'int', 'min' => 1, 'max' => 300, 'default' => 15],
         ]],
+        'live_view' => ['label' => 'Live view (stream the screen)', 'params' => [
+            // 0 stops a live view that is running
+            'seconds' => ['type' => 'int', 'min' => 0, 'max' => 600, 'default' => 120],
+            'interval' => ['type' => 'int', 'min' => 1, 'max' => 10, 'default' => 2],
+            'max_width' => ['type' => 'int', 'min' => 320, 'max' => 1920, 'default' => 960],
+            'quality' => ['type' => 'int', 'min' => 10, 'max' => 100, 'default' => 60],
+        ]],
         'screenshot' => ['label' => 'Take a screenshot', 'params' => [
             'max_width' => ['type' => 'int', 'min' => 320, 'max' => 4096, 'default' => 1280],
             'quality' => ['type' => 'int', 'min' => 10, 'max' => 100, 'default' => 70],
@@ -101,23 +108,103 @@ final class Commands
      * @param list<int> $deviceIds
      * @return list<int> command ids
      */
-    public static function queue(array $deviceIds, string $type, array $params, Principal $by, ?int $ttlHours = null): array
+    public static function queue(array $deviceIds, string $type, array $params, Principal $by, ?int $ttlHours = null,
+        ?int $scheduleId = null): array
     {
         $ttl = $ttlHours ?? (int) Config::get('command_ttl_hours', 24);
         $ttl = max(1, min(24 * 30, $ttl));
         $ids = [];
-        Db::transaction(static function () use ($deviceIds, $type, $params, $by, $ttl, &$ids): void {
+        Db::transaction(static function () use ($deviceIds, $type, $params, $by, $ttl, $scheduleId, &$ids): void {
             foreach ($deviceIds as $deviceId) {
+                $row = ['d' => $deviceId, 't' => $type, 'p' => Db::json((object) $params), 'by' => $by->adminId, 'ttl' => $ttl];
+                // schedule_id only exists after the 1.3.0 migration; only schedules set it
                 Db::run(
-                    'INSERT INTO commands (device_id, type, params, created_by, expires_at)
-                     VALUES (:d, :t, :p, :by, NOW() + INTERVAL :ttl HOUR)',
-                    ['d' => $deviceId, 't' => $type, 'p' => Db::json((object) $params),
-                     'by' => $by->adminId, 'ttl' => $ttl]
+                    $scheduleId === null
+                        ? 'INSERT INTO commands (device_id, type, params, created_by, expires_at)
+                           VALUES (:d, :t, :p, :by, NOW() + INTERVAL :ttl HOUR)'
+                        : 'INSERT INTO commands (device_id, type, params, created_by, schedule_id, expires_at)
+                           VALUES (:d, :t, :p, :by, :s, NOW() + INTERVAL :ttl HOUR)',
+                    $scheduleId === null ? $row : $row + ['s' => $scheduleId]
                 );
                 $ids[] = (int) Db::pdo()->lastInsertId();
             }
         });
         return $ids;
+    }
+
+    /**
+     * Checks and normalises a command target. Stored as-is on schedules.
+     *
+     * @return array{all: true}|array{profile_id: int}|array{tag: string}|array{device_ids: list<int>}
+     */
+    public static function normaliseTarget(mixed $t): array
+    {
+        if (!is_array($t)) {
+            throw HttpError::validation(['target' => 'Choose devices, a profile, a tag, or all devices.']);
+        }
+        if (!empty($t['device_ids'])) {
+            $ids = is_array($t['device_ids']) ? array_values(array_unique(array_filter($t['device_ids'], 'is_int'))) : [];
+            if ($ids === [] || count($ids) > 5000) {
+                throw HttpError::validation(['device_ids' => 'Must be a list of device ids.']);
+            }
+            return ['device_ids' => $ids];
+        }
+        if (array_key_exists('profile_id', $t)) {
+            if (!is_int($t['profile_id']) || Db::value('SELECT id FROM profiles WHERE id = :id', ['id' => $t['profile_id']]) === null) {
+                throw HttpError::validation(['profile_id' => 'Choose an existing profile.']);
+            }
+            return ['profile_id' => $t['profile_id']];
+        }
+        if (array_key_exists('tag', $t)) {
+            $tag = is_string($t['tag']) ? strtolower(trim($t['tag'])) : null;
+            if (!Devices::isTag($tag)) {
+                throw HttpError::validation(['tag' => 'Not a valid tag.']);
+            }
+            return ['tag' => $tag];
+        }
+        if (($t['all'] ?? null) === true) {
+            return ['all' => true];
+        }
+        throw HttpError::validation(['device_ids' => 'Choose devices, a profile_id, a tag, or all: true.']);
+    }
+
+    /**
+     * Active device ids a normalised target currently covers.
+     *
+     * @return list<int>
+     */
+    public static function resolveTargets(array $target): array
+    {
+        if (isset($target['device_ids'])) {
+            $in = implode(',', array_map('intval', $target['device_ids']));
+            $rows = Db::all("SELECT id FROM devices WHERE status = 'active' AND id IN ($in)");
+        } elseif (isset($target['profile_id'])) {
+            $rows = Db::all("SELECT id FROM devices WHERE status = 'active' AND profile_id = :p", ['p' => (int) $target['profile_id']]);
+        } elseif (isset($target['tag'])) {
+            Migrator::requireTable('device_tags');
+            $rows = Db::all("SELECT d.id FROM devices d JOIN device_tags t ON t.device_id = d.id
+                              WHERE d.status = 'active' AND t.tag = :t", ['t' => (string) $target['tag']]);
+        } else {
+            $rows = Db::all("SELECT id FROM devices WHERE status = 'active'");
+        }
+        return array_map(static fn ($r) => (int) $r['id'], $rows);
+    }
+
+    /** Human-readable description of a target, for lists and alerts. */
+    public static function describeTarget(array $target): string
+    {
+        if (isset($target['device_ids'])) {
+            $n = count($target['device_ids']);
+            return $n === 1 ? '1 device' : "$n devices";
+        }
+        if (isset($target['profile_id'])) {
+            $name = Db::value('SELECT name FROM profiles WHERE id = :id', ['id' => (int) $target['profile_id']]);
+            return 'profile ' . ($name ?? '#' . $target['profile_id'] . ' (deleted)');
+        }
+        if (isset($target['tag'])) {
+            return 'tag ' . $target['tag'];
+        }
+        return 'all devices';
     }
 
     /**
@@ -169,6 +256,7 @@ final class Commands
             'result' => $row['result'] === null ? null : Db::decode($row['result'], null),
             'has_attachment' => $row['attachment'] !== null,
             'created_by' => $row['created_by_name'] ?? null,
+            'schedule' => isset($row['schedule_name']) ? ['id' => (int) $row['schedule_id'], 'name' => $row['schedule_name']] : null,
             'created_at' => Util::iso($row['created_at']),
             'delivered_at' => Util::iso($row['delivered_at']),
             'completed_at' => Util::iso($row['completed_at']),

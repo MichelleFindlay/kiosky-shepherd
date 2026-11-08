@@ -27,7 +27,13 @@ final class Config
         'pbkdf2_iterations' => 120000,
         'setup_key' => '',
         'password_login' => true,
+        'auto_migrate' => true,
         'sso' => [],
+        'timezone' => 'UTC',
+        'fast_checkin_seconds' => 15,
+        // Lists inside 'alerts' get their defaults in Alerts, because
+        // array_replace_recursive() can't replace a default list with an empty one
+        'alerts' => [],
     ];
 
     /** @var array<string, mixed> */

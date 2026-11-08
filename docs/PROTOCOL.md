@@ -26,7 +26,7 @@ Version: **1**. All endpoints are under `/api/v1/device/`.
 | 401 | `device_unauthorized` | Credentials not accepted. **Stay locked down** with the cached policy and keep retrying with backoff. Show "Can't reach management server" in the PIN-unlocked toolbar. Never unlock because of a 401. |
 | 403 | `enrollment_invalid` | Only from `/enroll`: the code is wrong, used up, revoked or expired. |
 | 410 | `device_retired` | An admin removed this device. **Leave managed mode** (see §7). |
-| 429 | `rate_limited` | Wait at least 60 s before retrying. |
+| 429 | `rate_limited` | Wait at least 60 s before retrying. Each device may make 120 check-ins, 300 command results and 700 live-view frames per 10 minutes, and 30 release downloads per hour. |
 | 5xx / network error | | Keep the cached policy, retry with backoff (§4.4). |
 
 ## 2. Stored state on the device
@@ -204,7 +204,11 @@ straight after finishing any command.
 2. If `device.name` changed, store it.
 3. Handle `update` (§6).
 4. Run `commands` in order (§7).
-5. Schedule the next check-in after `checkin_seconds`.
+5. Schedule the next check-in after the response's top-level `checkin_seconds`,
+   not `policy.checkin_seconds`. They are usually equal, but while an admin has
+   the device's page open the server lowers the top-level value (to 15 s by
+   default) for a couple of minutes, so commands arrive quickly. This doesn't
+   change the policy `version`.
 
 ### 4.3 Doing this on Android
 
@@ -243,6 +247,13 @@ success.
   "orientation": "auto",
   "allow_exit": false,
   "lockdown": false,
+
+  "screen": {
+    "off_at": "22:00",
+    "on_at": "07:00",
+    "wake_on_touch": true,
+    "wake_minutes": 5
+  },
 
   "toolbar": {
     "mode": "hidden",
@@ -287,6 +298,8 @@ older apps. If a key is missing, use the default shown above.
 | `toolbar.pin` | `null`: no local unlock. Otherwise a technician can unlock the full toolbar (§5.3). |
 | `updates.*` | See §6. |
 | `checkin_seconds` | Interval of the check-in loop. |
+| `screen.off_at`, `screen.on_at` | Screen schedule, in the tablet's local time (`HH:MM`, 24-hour). `off_at` empty: no schedule. Between `off_at` and `on_at` (wrapping past midnight when `on_at` is earlier) turn the screen off: clear `FLAG_KEEP_SCREEN_ON` and set the window's `screenBrightness` to 0 and show a black overlay, or call `DevicePolicyManager.lockNow()` when Kiosky is the device owner. At `on_at` restore brightness (and wake the screen with a `FULL_WAKE_LOCK`/`setTurnScreenOn` when it was locked), then reload the page. Report `screen_schedule: "off"` or `"on"` in `status`. Added in server 1.4.0; apps that don't support it ignore these keys. |
+| `screen.wake_on_touch`, `screen.wake_minutes` | While off for the schedule, a touch turns the screen on for `wake_minutes`, then it goes off again. The touch must not reach the page. |
 
 ### 5.3 Technician unlock (PIN)
 
@@ -375,6 +388,7 @@ it again.
 | `show_message` | `text`, `seconds` | Show `text` large and centred over the page for `seconds`, with a dismiss button |
 | `identify` | `seconds` | Show the device name and id full-screen for `seconds` |
 | `screenshot` | `max_width`, `quality` | Capture the WebView (`web.draw()` into a `Bitmap`), scale it to at most `max_width`, encode as JPEG at `quality`, and send it in the result |
+| `live_view` | `seconds`, `interval`, `max_width`, `quality` | Report `done` straight away, then for `seconds` capture a frame as for `screenshot` every `interval` seconds and `POST /api/v1/device/live` it (below). A newer `live_view` replaces a running one; `seconds: 0` stops it. Stop early on 4xx answers. Added in server 1.4.0. |
 
 Unknown command types must be reported as `failed` with message
 `"unsupported command"`.
@@ -388,6 +402,16 @@ Unknown command types must be reported as `failed` with message
 For `screenshot`, add `"screenshot": "<base64 JPEG, PNG or WebP>"` (at most
 4 MB decoded by default). The response is `{"ok": true, "status": "done"}`.
 Reporting a finished command again is harmless.
+
+### `POST /api/v1/device/live`
+
+```json
+{ "screenshot": "<base64 JPEG, PNG or WebP>" }
+```
+
+One live-view frame. Each replaces the previous one; the server keeps only the
+latest, and the console polls it every 2 s while someone watches. Limited to 700
+frames per 10 minutes per device. Answers `{"ok": true}`.
 
 ## 8. Leaving managed mode
 

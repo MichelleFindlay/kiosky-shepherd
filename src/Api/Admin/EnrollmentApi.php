@@ -10,6 +10,7 @@ use Shepherd\Db;
 use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
+use Shepherd\Scope;
 use Shepherd\Util;
 
 final class EnrollmentApi
@@ -52,7 +53,8 @@ final class EnrollmentApi
     /** GET /api/v1/admin/enrollment-tokens?include_inactive=1 */
     public static function list(Request $req): Response
     {
-        AdminAuth::require($req, 'operator');
+        $p = AdminAuth::require($req, 'operator');
+        Scope::forbid($p, 'enrollment codes');
         $items = array_map(static fn ($r) => self::present($r), Db::all(self::SELECT . ' ORDER BY t.id DESC LIMIT 500'));
         if (($req->query['include_inactive'] ?? '') !== '1') {
             $items = array_values(array_filter($items, static fn ($t) => $t['state'] === 'active'));
@@ -64,6 +66,7 @@ final class EnrollmentApi
     public static function create(Request $req): Response
     {
         $p = AdminAuth::require($req, 'operator');
+        Scope::forbid($p, 'enrollment codes');
         $b = $req->json();
         $errors = [];
 
@@ -110,6 +113,7 @@ final class EnrollmentApi
     public static function revoke(Request $req): Response
     {
         $p = AdminAuth::require($req, 'operator');
+        Scope::forbid($p, 'enrollment codes');
         $id = $req->intParam('id');
         if (Db::run('UPDATE enrollment_tokens SET revoked = 1 WHERE id = :id', ['id' => $id])->rowCount() === 0
             && Db::value('SELECT id FROM enrollment_tokens WHERE id = :id', ['id' => $id]) === null) {

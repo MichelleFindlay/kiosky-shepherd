@@ -1,0 +1,12 @@
+# Static analysis, run by .github/workflows/ci.yml (and locally with `phpstan analyse`).
+# Level 2 catches unknown classes, functions and methods, wrong argument counts and
+# undefined variables. Raise the level as the code is tidied.
+parameters:
+    level: 2
+    paths:
+        - src
+        - bin
+        - index.php
+        - tests/smoke.php
+    bootstrapFiles:
+        - tests/phpstan-bootstrap.php

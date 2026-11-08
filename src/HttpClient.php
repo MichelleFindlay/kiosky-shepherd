@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Shepherd;
 
 /**
- * Minimal outgoing HTTPS client for talking to identity providers. Uses curl when
+ * Minimal outgoing HTTPS client for identity providers and alert webhooks. Uses curl when
  * available and PHP streams otherwise (which need allow_url_fopen). TLS
  * certificates are always verified.
  */
@@ -53,7 +53,7 @@ final class HttpClient
         }
 
         if (!filter_var(ini_get('allow_url_fopen'), FILTER_VALIDATE_BOOLEAN)) {
-            throw new \RuntimeException('Single sign-on needs the PHP curl extension or allow_url_fopen.');
+            throw new \RuntimeException('Outgoing requests (single sign-on, alert webhooks) need the PHP curl extension or allow_url_fopen.');
         }
         $ctx = stream_context_create([
             'http' => [

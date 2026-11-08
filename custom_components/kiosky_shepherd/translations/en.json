@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Kiosky Shepherd",
+        "description": "Create an API token in the Kiosky Shepherd console under API tokens. A viewer token is enough for sensors; buttons and services need the operator role.",
+        "data": {
+          "url": "Server address",
+          "api_token": "API token",
+          "verify_ssl": "Verify the TLS certificate"
+        }
+      },
+      "reauth_confirm": {
+        "title": "New API token",
+        "description": "The API token for {url} was refused (revoked or expired). Create a new one in the console under API tokens.",
+        "data": {
+          "api_token": "API token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Couldn't reach the server. Check the address (e.g. https://kiosks.example.com).",
+      "invalid_auth": "The API token was refused."
+    },
+    "abort": {
+      "already_configured": "This server is already set up.",
+      "reauth_successful": "The new token works."
+    }
+  },
+  "services": {
+    "send_command": {
+      "name": "Send command",
+      "description": "Queue a command for tablets. They run it at their next check-in.",
+      "fields": {
+        "device_id": { "name": "Tablets", "description": "The tablets to send it to." },
+        "command": { "name": "Command", "description": "A Kiosky Shepherd command type." },
+        "params": { "name": "Parameters", "description": "The command's parameters, if it has any." }
+      }
+    },
+    "show_message": {
+      "name": "Show message",
+      "description": "Show a large message over the page.",
+      "fields": {
+        "device_id": { "name": "Tablets", "description": "The tablets to show it on." },
+        "message": { "name": "Message", "description": "Up to 500 characters." },
+        "seconds": { "name": "Seconds", "description": "How long to show it." }
+      }
+    },
+    "open_page": {
+      "name": "Open page",
+      "description": "Open a page until the next reload or restart (the start page doesn't change).",
+      "fields": {
+        "device_id": { "name": "Tablets", "description": "The tablets to open it on." },
+        "url": { "name": "Address", "description": "An https:// address." }
+      }
+    }
+  }
+}

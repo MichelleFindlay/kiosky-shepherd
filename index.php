@@ -27,6 +27,9 @@ use Shepherd\Http\Router;
 
 ini_set('display_errors', '0');
 
+// Apply database updates left by an upgrade (see Migrator::autoRun; off with 'auto_migrate' => false)
+\Shepherd\Migrator::autoRun();
+
 $router = new Router();
 (require SHEPHERD_ROOT . '/src/routes.php')($router);
 

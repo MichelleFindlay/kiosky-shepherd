@@ -91,6 +91,9 @@ function statusChip(s) {
   return h('span', { class: 'chip ' + cls }, s);
 }
 
+// True when this user only sees devices with certain tags
+const scoped = () => !!(state.me && state.me.scope_tags && state.me.scope_tags.length);
+
 const can = (role) => {
   const rank = { viewer: 1, operator: 2, admin: 3 };
   return state.me && rank[state.me.role] >= rank[role];
@@ -150,8 +153,9 @@ const NAV = [
   ['#/overview', 'Overview', 'viewer'],
   ['#/devices', 'Devices', 'viewer'],
   ['#/profiles', 'Profiles', 'viewer'],
-  ['#/enroll', 'Enrollment', 'operator'],
+  ['#/enroll', 'Enrollment', 'operator', true],
   ['#/commands', 'Commands', 'viewer'],
+  ['#/schedules', 'Schedules', 'viewer', true],
   ['#/releases', 'Releases', 'viewer'],
   ['#/users', 'Users', 'admin'],
   ['#/tokens', 'API tokens', 'viewer'],
@@ -162,7 +166,9 @@ let mainEl = null;
 
 function renderShell() {
   const app = clear(document.getElementById('app'));
-  const nav = h('nav', { class: 'nav' }, NAV.filter(([, , r]) => can(r)).map(([href, label]) => h('a', { href }, label)));
+  // The fourth column marks fleet-wide pages that users limited to some devices don't get
+  const nav = h('nav', { class: 'nav' }, NAV.filter(([, , r, fleet]) => can(r) && !(fleet && scoped()))
+    .map(([href, label]) => h('a', { href }, label)));
   mainEl = h('main', { id: 'main' });
   // On phones the sidebar collapses into a top bar; this button opens the menu
   const menuBtn = h('button', { class: 'menu-btn', type: 'button', 'aria-label': 'Menu', 'aria-expanded': 'false' },
@@ -175,9 +181,17 @@ function renderShell() {
     h('div', { class: 'side-foot' },
       h('div', {}, h('a', { href: '#/account' }, state.me.username), ' · ', state.me.role),
       state.server ? h('div', { class: 'version' }, `Kiosky Shepherd ${state.server.version}`) : null,
+      state.server && state.server.cron ? h('div', { class: 'version', id: 'cron-status' }, cronLine(state.server.cron)) : null,
       h('button', { class: 'small', onclick: logout }, 'Sign out')));
   menuBtn.addEventListener('click', () => setMenu(!side.classList.contains('open')));
   app.append(h('div', { class: 'shell' }, side, mainEl));
+}
+
+// "Cron: 4m ago", with a warning when bin/cron.php hasn't run for 30 minutes
+function cronLine(c) {
+  return h('span', { title: c.last_run_at ? [dateTime(c.last_run_at), c.summary].filter(Boolean).join('\n') : 'bin/cron.php has never run' },
+    'Cron: ', c.last_run_at ? ago(c.last_run_at) : 'never',
+    c.stale ? [' ', h('span', { class: 'chip warn' }, c.last_run_at ? 'Overdue' : 'Not set up')] : null);
 }
 
 function setMenu(open) {
@@ -190,7 +204,8 @@ function setMenu(open) {
 function highlightNav() {
   const hash = location.hash || '#/overview';
   document.querySelectorAll('.nav a').forEach((a) => {
-    a.classList.toggle('active', hash === a.getAttribute('href') || hash.startsWith(a.getAttribute('href') + '/'));
+    const href = a.getAttribute('href');
+    a.classList.toggle('active', hash === href || hash.startsWith(href + '/') || hash.startsWith(href + '?'));
   });
 }
 
@@ -257,7 +272,9 @@ async function renderLogin() {
       e.preventDefault();
       err.hidden = true;
       try {
-        signedIn(await api.post('/admin/session', { username: user.value, password: pass.value }));
+        const r = await api.post('/admin/session', { username: user.value, password: pass.value });
+        if (r.two_factor_required) renderSecondFactor();
+        else signedIn(r);
       } catch (ex) {
         err.textContent = ex.message;
         err.hidden = false;
@@ -275,6 +292,32 @@ async function renderLogin() {
       sso, sso && form ? h('div', { class: 'or' }, 'or') : null, form,
       !sso && !form && !setupError ? h('p', { class: 'error-text' }, 'No sign-in method is turned on in config/config.php.') : null)));
   if (form) user.focus();
+}
+
+// Second step of a password sign-in when the user has two-factor sign-in on
+function renderSecondFactor() {
+  const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: 16, class: 'code-input' });
+  const err = h('div', { class: 'error-text', hidden: true });
+  const form = h('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      try {
+        signedIn(await api.post('/admin/session/2fa', { code: code.value }));
+      } catch (ex) {
+        if (ex.code === 'two_factor_expired') { renderLogin(); toast(ex.message, true); return; }
+        err.textContent = ex.message;
+        err.hidden = false;
+        code.select();
+      }
+    },
+  },
+  field('Code', code, 'The 6-digit code from your authenticator app, or one of your recovery codes.'), err,
+  h('button', { class: 'primary', type: 'submit' }, 'Verify'));
+  clear(document.getElementById('app')).append(h('div', { class: 'login' },
+    h('div', { class: 'card' }, logo(), h('h1', {}, 'Two-factor sign-in'), form,
+      h('p', { class: 'sub' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, '← Use a different account')))));
+  code.focus();
 }
 
 function logo() {
@@ -321,6 +364,7 @@ async function logout() {
 
 function stopTimer() {
   if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  if (state.liveTimer) { clearInterval(state.liveTimer); state.liveTimer = null; }
 }
 
 function every(ms, fn) {
@@ -332,12 +376,13 @@ function every(ms, fn) {
 
 const ROUTES = [
   [/^#\/overview$/, viewOverview],
-  [/^#\/devices$/, viewDevices],
+  [/^#\/devices(?:\?(.*))?$/, viewDevices],
   [/^#\/devices\/(\d+)$/, viewDevice],
   [/^#\/profiles$/, viewProfiles],
   [/^#\/profiles\/(\d+)$/, viewProfile],
   [/^#\/enroll$/, viewEnroll],
   [/^#\/commands$/, viewCommands],
+  [/^#\/schedules$/, viewSchedules],
   [/^#\/releases$/, viewReleases],
   [/^#\/users$/, viewUsers],
   [/^#\/tokens$/, viewTokens],
@@ -373,7 +418,8 @@ async function route() {
 async function viewOverview() {
   const render = async () => {
     const o = await api.get('/admin/overview');
-    page('Overview', can('operator') ? h('a', { class: 'btn', href: '#/enroll' }, 'Enroll devices') : null);
+    page('Overview', can('operator') && !scoped() ? h('a', { class: 'btn', href: '#/enroll' }, 'Enroll devices') : null);
+    if (scoped()) mainEl.append(h('p', { class: 'sub' }, `You see devices tagged ${state.me.scope_tags.join(', ')}.`));
     const tile = (num, label, href) => h('a', { class: 'card tile', href }, h('div', { class: 'num' }, num), h('div', { class: 'label' }, label));
     mainEl.append(h('div', { class: 'tiles' },
       tile(o.devices.total, 'Managed devices', '#/devices'),
@@ -405,23 +451,58 @@ async function viewOverview() {
         h('td', {}, when(e.created_at))))))));
     }
     const c = o.cron;
+    if (state.server) state.server.cron = c;
+    refreshCronLine();
     const server = h('div', { class: 'card' }, h('h2', {}, 'Server'), h('dl', { class: 'kv' },
       h('dt', {}, 'Version'), h('dd', {}, state.server ? state.server.version : '—'),
       h('dt', {}, 'Last cron run'), h('dd', {},
         c.last_run_at ? h('span', { title: [dateTime(c.last_run_at), c.summary].filter(Boolean).join('\n') }, ago(c.last_run_at)) : 'never',
         c.stale ? [' ', h('span', { class: 'chip warn' }, c.last_run_at ? 'Overdue' : 'Not set up')] : null)),
       c.stale ? h('p', { class: 'sub' }, 'Schedule ', h('code', {}, 'php bin/cron.php'),
-        ' every 10 minutes (cPanel → Cron Jobs). It expires old commands and prunes old events.') : null);
+        ' every 10 minutes (cPanel → Cron Jobs). It runs scheduled commands, sends offline alerts, expires old commands and prunes old events.') : null,
+      alertsSummary(o.alerts));
+    server.querySelector('dl').append(h('dt', {}, 'Offline alerts'), h('dd', {}, alertsLine(o.alerts)));
     mainEl.append(h('div', { class: 'grid grid-2' }, attention, h('div', { class: 'stack' }, versions, server, events)));
   };
   await render();
   every(30000, () => render().catch(() => {}));
 }
 
+function alertsLine(a) {
+  if (!a) return '—';
+  const channels = [];
+  if (a.email) channels.push(`${a.email} email address${a.email === 1 ? '' : 'es'}`);
+  for (const w of a.webhooks) channels.push(w);
+  return channels.length ? `${channels.join(', ')} · after ${a.offline_minutes} min` : 'Off';
+}
+
+function alertsSummary(a) {
+  if (!a || !can('admin')) return null;
+  if (!a.email && !a.webhooks.length) {
+    return h('p', { class: 'sub' }, 'To be told when kiosks go offline, add email addresses or webhooks under ',
+      h('code', {}, "'alerts'"), ' in config/config.php.');
+  }
+  const btn = h('button', { class: 'small' }, 'Send test alert');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const r = await api.post('/admin/alerts/test');
+      const bad = r.results.filter((x) => !x.ok);
+      if (!bad.length) toast(`Sent to ${r.results.map((x) => x.channel).join(', ')}.`);
+      else toast(bad.map((x) => `${x.channel}: ${x.error}`).join(' · '), true);
+    } catch (ex) { fail(ex); } finally { btn.disabled = false; }
+  });
+  return h('div', { class: 'actions' }, btn,
+    a.ignore_tags.length ? h('span', { class: 'sub' }, `Devices tagged ${a.ignore_tags.join(', ')} are never reported.`) : null);
+}
+
 /* ------------------------------------------------------------------ devices */
 
-function commandForm(types, onSend) {
-  const select = h('select', {}, types.map((t) => h('option', { value: t.type }, t.label)));
+// opts.label: the submit button's text. opts.extra: fields shown after the parameters.
+// opts.initial: {type, params} to start from.
+function commandForm(types, onSend, opts = {}) {
+  const initial = opts.initial || {};
+  const select = h('select', {}, types.map((t) => h('option', { value: t.type, selected: t.type === initial.type }, t.label)));
   const paramsBox = h('div', {});
   let inputs = {};
   const renderParams = () => {
@@ -430,36 +511,55 @@ function commandForm(types, onSend) {
     const t = types.find((x) => x.type === select.value);
     for (const [name, p] of Object.entries(t.params)) {
       let input;
-      if (p.type === 'int') input = h('input', { type: 'number', min: p.min, max: p.max, value: p.default ?? '' });
-      else if (p.type === 'string') input = h('textarea', { maxlength: p.max });
-      else input = h('input', { type: 'url', placeholder: 'https://' });
+      const start = initial.type === t.type && initial.params ? initial.params[name] : undefined;
+      if (p.type === 'profile') {
+        input = h('select', {}, (opts.profiles || []).map((x) => h('option', { value: x.id, selected: x.id === start }, x.name)));
+      } else if (p.type === 'int') input = h('input', { type: 'number', min: p.min, max: p.max, value: start ?? p.default ?? '' });
+      else if (p.type === 'string') { input = h('textarea', { maxlength: p.max }); input.value = start ?? ''; }
+      else input = h('input', { type: 'url', placeholder: 'https://', value: start ?? '' });
       inputs[name] = { input, p };
       paramsBox.append(field(name.replace(/_/g, ' ') + (p.required ? '' : ' (optional)'), input));
     }
   };
   select.addEventListener('change', renderParams);
   renderParams();
-  const button = h('button', { class: 'primary', type: 'submit' }, 'Send');
+  const button = h('button', { class: 'primary', type: 'submit' }, opts.label || 'Send');
   return h('form', {
     onsubmit: async (e) => {
       e.preventDefault();
       const params = {};
       for (const [name, { input, p }] of Object.entries(inputs)) {
         if (input.value === '') continue;
-        params[name] = p.type === 'int' ? parseInt(input.value, 10) : input.value;
+        params[name] = p.type === 'int' || p.type === 'profile' ? parseInt(input.value, 10) : input.value;
       }
       button.disabled = true;
       try { await onSend(select.value, params); } catch (ex) { fail(ex); } finally { button.disabled = false; }
     },
-  }, field('Command', select), paramsBox, button);
+  }, field('Command', select), paramsBox, opts.extra || null, button);
 }
 
-async function viewDevices() {
-  const profiles = await api.get('/admin/profiles');
+// Tag chips; clicking one filters the device list by it
+function tagChips(tags) {
+  if (!tags || !tags.length) return null;
+  return h('span', { class: 'tags' }, tags.map((t) => h('a', {
+    class: 'chip tag', href: `#/devices?tag=${encodeURIComponent(t)}`, onclick: (e) => e.stopPropagation(),
+  }, t)));
+}
+
+function parseTags(text) {
+  return text.split(/[\s,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+async function viewDevices(query) {
+  const [profiles, tags] = await Promise.all([api.get('/admin/profiles'), api.get('/admin/tags')]);
+  const initialTag = new URLSearchParams(query || '').get('tag') || '';
+  const tagSel = h('select', {}, h('option', { value: '' }, 'All tags'),
+    tags.map((t) => h('option', { value: t.tag, selected: t.tag === initialTag }, `${t.tag} (${t.devices})`)),
+    initialTag && !tags.some((t) => t.tag === initialTag) ? h('option', { value: initialTag, selected: true }, initialTag) : null);
   const q = h('input', { type: 'search', placeholder: 'Search name, model, IP, notes…' });
   const profileSel = h('select', {}, h('option', { value: '' }, 'All profiles'), profiles.map((p) => h('option', { value: p.id }, p.name)));
   const statusSel = h('select', {}, h('option', { value: 'active' }, 'Active'), h('option', { value: 'retired' }, 'Retired'), h('option', { value: 'all' }, 'All'));
-  page('Devices', can('operator') ? h('a', { class: 'btn', href: '#/enroll' }, 'Enroll devices') : null);
+  page('Devices', can('operator') && !scoped() ? h('a', { class: 'btn', href: '#/enroll' }, 'Enroll devices') : null);
 
   const selected = new Set();
   const tableBox = h('div', {});
@@ -473,16 +573,33 @@ async function viewDevices() {
         const r = await api.post('/admin/commands', { type, params, device_ids: [...selected] });
         toast(`Queued for ${r.queued} device${r.queued === 1 ? '' : 's'}.`);
       }));
+    const tagInput = h('input', { type: 'text', placeholder: 'e.g. lobby, floor-2' });
+    const tagAction = async (op) => {
+      const list = parseTags(tagInput.value);
+      if (!list.length) { toast('Type one or more tags first.', true); return; }
+      try {
+        const r = await api.post('/admin/device-tags', { device_ids: [...selected], [op]: list });
+        toast(`${op === 'add' ? 'Tagged' : 'Untagged'} ${r.updated} device${r.updated === 1 ? '' : 's'}.`
+          + (r.skipped_too_many_tags.length ? ` ${r.skipped_too_many_tags.length} skipped: too many tags.` : ''));
+        tagInput.value = '';
+        load().catch(fail);
+      } catch (ex) { fail(ex); }
+    };
+    bulkBox.append(h('h3', {}, 'Tags'), h('div', { class: 'row' }, field('Tags', tagInput),
+      h('div', { class: 'field' }, h('div', { class: 'actions' },
+        h('button', { type: 'button', onclick: () => tagAction('add') }, 'Add to selected'),
+        h('button', { type: 'button', onclick: () => tagAction('remove') }, 'Remove from selected')))));
   }
 
   const load = async () => {
     const params = new URLSearchParams({ status: statusSel.value });
     if (q.value.trim()) params.set('q', q.value.trim());
     if (profileSel.value) params.set('profile_id', profileSel.value);
+    if (tagSel.value) params.set('tag', tagSel.value);
     const r = await api.get('/admin/devices?' + params);
     clear(tableBox);
     if (!r.items.length) {
-      tableBox.append(h('div', { class: 'empty' }, statusSel.value === 'active' && !q.value && !profileSel.value
+      tableBox.append(h('div', { class: 'empty' }, statusSel.value === 'active' && !q.value && !profileSel.value && !tagSel.value
         ? 'No devices yet. Create an enrollment code to add some.' : 'No devices match.'));
       return;
     }
@@ -498,7 +615,8 @@ async function viewDevices() {
     });
     tableBox.append(h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, can('operator') ? h('th', {}, all) : null, h('th', {}, 'Name'), h('th', { class: 'hide-sm' }, 'Profile'),
-        h('th', { class: 'hide-sm' }, 'Model'), h('th', {}, 'Kiosky'), h('th', { class: 'hide-sm' }, 'Page'), h('th', { class: 'hide-sm' }, 'Policy'), h('th', {}, 'Last seen'))),
+        h('th', { class: 'hide-sm' }, 'Model'), h('th', {}, 'Kiosky'), h('th', { class: 'hide-sm' }, 'Page'), h('th', { class: 'hide-sm' }, 'Policy'),
+        h('th', { class: 'num hide-sm', title: 'Share of the last 7 days the device was online' }, 'Online 7d'), h('th', {}, 'Last seen'))),
       h('tbody', {}, r.items.map((d) => {
         const go = () => { location.hash = `#/devices/${d.id}`; };
         let box = null;
@@ -510,12 +628,13 @@ async function viewDevices() {
         const st = d.state || {};
         return h('tr', { class: 'clickable', onclick: go },
           can('operator') ? h('td', {}, box) : null,
-          h('td', {}, h('span', { class: 'dot ' + (d.online ? 'ok' : (d.status === 'active' ? 'bad' : '')) }), d.name),
+          h('td', {}, h('span', { class: 'dot ' + (d.online ? 'ok' : (d.status === 'active' ? 'bad' : '')) }), d.name, tagChips(d.tags)),
           h('td', { class: 'hide-sm' }, d.profile_name),
           h('td', { class: 'hide-sm' }, [d.manufacturer, d.model].filter(Boolean).join(' ') || '—'),
           h('td', {}, d.app_version || '—'),
           h('td', { class: 'trunc hide-sm', title: st.current_url || '' }, st.current_url || '—'),
           h('td', { class: 'hide-sm' }, d.status !== 'active' ? '—' : d.policy_current ? h('span', { class: 'chip ok' }, 'Applied') : h('span', { class: 'chip warn' }, 'Pending')),
+          h('td', { class: 'num hide-sm' }, uptimeCell(d.uptime_7d)),
           h('td', {}, when(d.last_seen_at)));
       })))));
     syncBulk();
@@ -524,10 +643,16 @@ async function viewDevices() {
   let debounce = null;
   q.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => load().catch(fail), 250); });
   profileSel.addEventListener('change', () => load().catch(fail));
+  tagSel.addEventListener('change', () => {
+    // Keep the tag in the address, so tag links and the back button work
+    history.replaceState(null, '', tagSel.value ? `#/devices?tag=${encodeURIComponent(tagSel.value)}` : '#/devices');
+    load().catch(fail);
+  });
   statusSel.addEventListener('change', () => { selected.clear(); load().catch(fail); });
 
   mainEl.append(h('div', { class: 'stack' },
-    h('div', { class: 'row' }, h('div', { class: 'field' }, q), h('div', { class: 'field' }, profileSel), h('div', { class: 'field' }, statusSel)),
+    h('div', { class: 'row' }, h('div', { class: 'field' }, q), h('div', { class: 'field' }, profileSel),
+      h('div', { class: 'field' }, tagSel), h('div', { class: 'field' }, statusSel)),
     h('div', { class: 'card' }, tableBox),
     bulkBox));
   await load();
@@ -603,6 +728,10 @@ function makeControl(def, value, releases, wasSet) {
       get = () => el.value;
       break;
     }
+    case 'time':
+      el = h('input', { type: 'time', value: value || '' });
+      get = () => el.value;
+      break;
     case 'pin':
       el = h('input', { type: 'password', inputmode: 'numeric', autocomplete: 'new-password',
         placeholder: wasSet ? 'PIN is set; type to change' : '4–12 digits' });
@@ -635,17 +764,22 @@ async function viewDevice(id) {
   const prof = h('select', { disabled: !editable }, profiles.map((p) => h('option', { value: p.id, selected: p.id === d.profile_id }, p.name)));
   const notes = h('textarea', { disabled: !editable });
   notes.value = d.notes || '';
+  const tagsInput = h('input', { type: 'text', value: (d.tags || []).join(', '), disabled: !editable, placeholder: 'e.g. lobby, floor-2' });
   const infoCard = h('div', { class: 'card' }, h('h2', {}, 'Device'),
     h('form', {
       onsubmit: async (e) => {
         e.preventDefault();
         try {
-          await api.patch(`/admin/devices/${id}`, { name: name.value, profile_id: parseInt(prof.value, 10), notes: notes.value });
+          await api.patch(`/admin/devices/${id}`, {
+            name: name.value, profile_id: parseInt(prof.value, 10), notes: notes.value, tags: parseTags(tagsInput.value),
+          });
           toast('Saved.');
           route();
         } catch (ex) { fail(ex); }
       },
-    }, field('Name', name), field('Profile', prof, 'The device gets this profile\'s policy, plus any overrides below.'), field('Notes', notes),
+    }, field('Name', name), field('Profile', prof, 'The device gets this profile\'s policy, plus any overrides below.'),
+    field('Tags', tagsInput, 'Labels for finding and targeting devices across profiles: lower-case letters, digits, - _ and ., separated by commas. Devices tagged no-alerts are left out of offline alerts.'),
+    field('Notes', notes),
     editable ? h('button', { class: 'primary', type: 'submit' }, 'Save') : null));
 
   // Status
@@ -665,9 +799,17 @@ async function viewDevice(id) {
 
   // Commands
   const cmdList = h('div', {});
+  const shotsBox = h('div', {});
+  // While this page is open the device is asked to check in every few seconds
+  const watch = () => (d.status === 'active' ? api.post(`/admin/devices/${id}/watch`).catch(() => null) : Promise.resolve(null));
   const loadCommands = async () => {
-    const r = await api.get(`/admin/commands?device_id=${id}&limit=25`);
+    const [r, shots] = await Promise.all([
+      api.get(`/admin/commands?device_id=${id}&limit=25`),
+      api.get(`/admin/commands?device_id=${id}&type=screenshot&limit=12`),
+      watch(),
+    ]);
     renderCommandTable(cmdList, r.items, false, loadCommands);
+    renderScreenshots(shotsBox, shots.items);
   };
   const cmdCard = h('div', { class: 'card' }, h('h2', {}, 'Commands'));
   if (editable) {
@@ -678,11 +820,39 @@ async function viewDevice(id) {
     }), h('h3', {}, 'History'));
   }
   cmdCard.append(cmdList);
+  if (d.status === 'active') {
+    cmdCard.append(h('p', { class: 'sub' }, 'While this page is open, the device checks in every few seconds instead of every ',
+      `${d.checkin_seconds} s, so commands arrive quickly.`));
+  }
+
+  const shotsCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Screenshots'),
+    editable ? h('button', {
+      class: 'small',
+      onclick: async () => {
+        try {
+          await api.post(`/admin/devices/${id}/commands`, { type: 'screenshot', params: {} });
+          toast('Screenshot requested.');
+          loadCommands();
+        } catch (ex) { fail(ex); }
+      },
+    }, 'Take screenshot') : null), shotsBox);
+
+  // Live view: the device streams frames while a live_view command runs (needs Kiosky support)
+  const liveCard = liveViewCard(d, editable);
+
+  // Health history
+  const healthCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Health, last 30 days'),
+    d.uptime_7d != null ? h('span', { class: 'sub' }, `Online ${d.uptime_7d}% of the last 7 days`) : null));
+  api.get(`/admin/devices/${id}/history?days=30`).then((r) => healthCard.append(healthCharts(r))).catch(() => {
+    healthCard.append(h('div', { class: 'empty' }, 'No history yet.'));
+  });
 
   // Policy overrides
   const inherited = {};
   for (const def of defs) {
-    inherited[def.key] = Object.prototype.hasOwnProperty.call(pol.profile, def.key)
+    const src = pol.sources[def.key] || '';
+    if (src.startsWith('tag:')) inherited[def.key] = { value: pol.values[def.key], from: `the ${src.slice(4)} release ring` };
+    else inherited[def.key] = Object.prototype.hasOwnProperty.call(pol.profile, def.key)
       ? { value: pol.profile[def.key], from: `profile ${d.profile_name}` }
       : { value: def.default, from: 'default' };
   }
@@ -742,9 +912,177 @@ async function viewDevice(id) {
 
   mainEl.append(h('div', { class: 'stack' },
     h('div', { class: 'grid grid-2' }, statusCard, infoCard),
-    cmdCard, policyCard, eventsCard, danger));
+    cmdCard, liveCard, shotsCard, healthCard, policyCard, eventsCard, danger));
   await loadCommands();
   every(20000, () => loadCommands().catch(() => {}));
+}
+
+function uptimeCell(v) {
+  if (v == null) return '—';
+  return v < 90 ? h('span', { class: 'chip warn', title: 'Online less than 90% of the time' }, `${v}%`) : `${v}%`;
+}
+
+/* Small single-series charts, drawn as SVG with DOM methods (the CSP allows no inline styles) */
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs, ...children) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) el.setAttribute(k, String(v));
+  for (const c of children.flat()) if (c) el.append(c);
+  return el;
+}
+
+// One metric over the days: bars from a zero baseline, or a line with dots.
+// Every day gets a full-height hover target with a native tooltip.
+function miniChart({ title, days, value, format, kind, min, max, note }) {
+  // Drawn at roughly its on-screen size (cards are ~300–400 px wide) so 10px labels stay legible
+  const W = 340, H = 120, top = 8, bottom = 18, left = 34, right = 6;
+  const n = days.length;
+  const step = (W - left - right) / n;
+  const y = (v) => top + (H - top - bottom) * (1 - (v - min) / (max - min));
+  const g = svg('g', {});
+  // Recessive grid: top and bottom values only
+  for (const v of [min, max]) {
+    g.append(svg('line', { x1: left, x2: W - right, y1: y(v), y2: y(v), class: 'grid-line' }),
+      svg('text', { x: left - 4, y: y(v) + 3, class: 'axis-label', 'text-anchor': 'end' }, format(v)));
+  }
+  const pts = [];
+  days.forEach((d, i) => {
+    const v = value(d);
+    const cx = left + step * i + step / 2;
+    if (v != null && kind === 'bar') {
+      const bw = Math.max(2, step - 2); // 2px surface gap between bars
+      const h0 = y(min) - y(Math.max(min, v));
+      if (h0 > 0) g.append(svg('path', { class: 'bar', d: roundedBar(cx - bw / 2, y(Math.max(min, v)), bw, h0, Math.min(4, bw / 2)) }));
+    }
+    if (v != null && kind === 'line') pts.push([cx, y(Math.min(max, Math.max(min, v)))]);
+    const hit = svg('rect', { x: left + step * i, y: top, width: step, height: H - top - bottom, class: 'hit' },
+      svg('title', {}, `${d.date}: ${v == null ? 'no data' : format(v)}`));
+    g.append(hit);
+  });
+  if (pts.length) {
+    // Break the line across days with no data
+    let dPath = '';
+    let prevI = -2;
+    days.forEach((d, i) => {
+      const v = value(d);
+      if (v == null) return;
+      const [px, py] = [left + step * i + step / 2, y(Math.min(max, Math.max(min, v)))];
+      dPath += (i === prevI + 1 ? 'L' : 'M') + px.toFixed(1) + ' ' + py.toFixed(1);
+      prevI = i;
+    });
+    g.prepend(svg('path', { class: 'line', d: dPath }));
+    for (const [px, py] of pts) g.append(svg('circle', { class: 'dot-mark', cx: px, cy: py, r: 3 }));
+    g.querySelectorAll('.hit').forEach((r) => g.append(r)); // hover targets on top
+  }
+  g.append(svg('text', { x: left, y: H - 4, class: 'axis-label' }, days[0].date.slice(5)),
+    svg('text', { x: W - right, y: H - 4, class: 'axis-label', 'text-anchor': 'end' }, 'today'));
+  return h('figure', { class: 'mini-chart' }, h('figcaption', {}, title, note ? h('span', { class: 'sub' }, ` ${note}`) : null),
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': title }, g));
+}
+
+function roundedBar(x, yTop, w, hgt, r) {
+  // Rounded top corners, square at the baseline
+  r = Math.min(r, hgt);
+  return `M${x} ${yTop + hgt}V${yTop + r}Q${x} ${yTop} ${x + r} ${yTop}H${x + w - r}Q${x + w} ${yTop} ${x + w} ${yTop + r}V${yTop + hgt}Z`;
+}
+
+function healthCharts(r) {
+  const days = r.days;
+  const any = days.some((d) => d.checkins > 0);
+  if (!any) return h('div', { class: 'empty' }, 'No check-ins recorded yet. History starts after the 1.4.0 update.');
+  const pct = (v) => `${Math.round(v)}%`;
+  const wifiVals = days.map((d) => d.wifi_avg).filter((v) => v != null);
+  const charts = [
+    miniChart({ title: 'Online', note: '(% of each day)', days, value: (d) => d.uptime, format: pct, kind: 'bar', min: 0, max: 100 }),
+    miniChart({ title: 'Lowest battery', note: '(%)', days, value: (d) => d.battery_min, format: pct, kind: 'line', min: 0, max: 100 }),
+  ];
+  if (wifiVals.length) {
+    const lo = Math.min(-90, ...wifiVals);
+    charts.push(miniChart({ title: 'Wi-Fi signal', note: '(average dBm; higher is better)', days, value: (d) => d.wifi_avg,
+      format: (v) => `${Math.round(v)}`, kind: 'line', min: Math.floor(lo / 10) * 10, max: -30 }));
+  }
+  if (days.some((d) => d.page_errors > 0)) {
+    const maxErr = Math.max(...days.map((d) => d.page_errors));
+    charts.push(miniChart({ title: 'Page errors', note: '(per day)', days, value: (d) => d.page_errors, format: (v) => `${Math.round(v)}`,
+      kind: 'bar', min: 0, max: Math.max(1, maxErr) }));
+  }
+  const table = h('details', {}, h('summary', { class: 'sub' }, 'Show as a table'),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Day'), h('th', { class: 'num' }, 'Online'), h('th', { class: 'num' }, 'Check-ins'),
+        h('th', { class: 'num' }, 'Battery'), h('th', { class: 'num' }, 'Wi-Fi (avg / worst)'), h('th', { class: 'num' }, 'Page errors'))),
+      h('tbody', {}, days.slice().reverse().map((d) => h('tr', {},
+        h('td', {}, d.date),
+        h('td', { class: 'num' }, d.uptime == null ? '—' : `${d.uptime}%`),
+        h('td', { class: 'num' }, d.checkins),
+        h('td', { class: 'num' }, d.battery_min == null ? '—' : `${d.battery_min}–${d.battery_max}%`),
+        h('td', { class: 'num' }, d.wifi_avg == null ? '—' : `${d.wifi_avg} / ${d.wifi_min} dBm`),
+        h('td', { class: 'num' }, d.page_errors)))))));
+  return h('div', {}, h('div', { class: 'mini-charts' }, charts),
+    h('p', { class: 'sub' }, `Days run midnight to midnight, ${r.timezone}.`), table);
+}
+
+function liveViewCard(d, editable) {
+  const card = h('div', { class: 'card' });
+  if (d.status !== 'active') { card.hidden = true; return card; }
+  const img = h('div', { class: 'live-frame empty-frame', hidden: true });
+  const status = h('div', { class: 'sub' }, 'Streams the tablet\'s screen every couple of seconds. Needs a Kiosky version with live view.');
+  const btn = h('button', { class: 'small' }, 'Start live view');
+  let running = false;
+  let started = 0;
+  const queue = (seconds) => api.post(`/admin/devices/${d.id}/commands`, { type: 'live_view', params: { seconds, interval: 2 }, ttl_hours: 1 });
+  const stop = async (send = true) => {
+    running = false;
+    if (state.liveTimer) { clearInterval(state.liveTimer); state.liveTimer = null; }
+    btn.textContent = 'Start live view';
+    if (send) { try { await queue(0); } catch (e) { /* the device stops by itself */ } }
+  };
+  btn.addEventListener('click', async () => {
+    if (running) { stop(); status.textContent = 'Stopped.'; return; }
+    try { await queue(120); } catch (ex) { fail(ex); return; }
+    running = true;
+    started = Date.now();
+    btn.textContent = 'Stop';
+    status.textContent = 'Waiting for the tablet to pick up the request (up to 15 s)…';
+    img.hidden = false;
+    let frame = img;
+    let gotFrame = false;
+    state.liveTimer = setInterval(() => {
+      if (document.hidden) return;
+      if (!gotFrame && Date.now() - started > 40000) {
+        status.textContent = 'No frames yet. If the command history shows "unsupported command", this Kiosky version can\'t stream; use Take screenshot instead.';
+      }
+      // Keep it going while someone is watching: renew before the 120 s run ends
+      if (Date.now() - started > 100000) { started = Date.now(); queue(120).catch(() => {}); }
+      // Load the next frame off-screen and swap it in once it has arrived, so a missing
+      // frame (404 until the tablet starts sending) never shows as a broken image.
+      // A plain same-origin URL, because the console's CSP doesn't allow blob: images.
+      const next = h('img', { class: 'live-frame', alt: `Live view of ${d.name}` });
+      next.addEventListener('load', () => {
+        if (!running) return;
+        frame.replaceWith(next);
+        frame = next;
+        gotFrame = true;
+        status.textContent = `Live · updated ${new Date().toLocaleTimeString()}`;
+      });
+      next.src = `/api/v1/admin/devices/${d.id}/live?t=${Date.now()}`;
+    }, 2000);
+  });
+  card.append(h('div', { class: 'card-head' }, h('h2', {}, 'Live view'), editable ? btn : null), status, img);
+  return card;
+}
+
+function renderScreenshots(box, items) {
+  clear(box);
+  if (!items.length) { box.append(h('div', { class: 'empty' }, 'No screenshots yet.')); return; }
+  box.append(h('div', { class: 'shots' }, items.map((c) => {
+    const caption = h('div', { class: 'sub' }, when(c.completed_at || c.created_at), c.created_by ? ` · ${c.created_by}` : '');
+    if (c.has_attachment) {
+      const src = `/api/v1/admin/commands/${c.id}/screenshot`;
+      return h('figure', {}, h('a', { href: src, target: '_blank', rel: 'noopener' }, h('img', { src, alt: 'Screenshot', loading: 'lazy' })), caption);
+    }
+    return h('figure', { class: 'pending' }, h('div', { class: 'shot-placeholder' }, statusChip(c.status),
+      c.result && c.result.message ? h('div', { class: 'sub' }, c.result.message) : null), caption);
+  })));
 }
 
 function renderCommandTable(box, items, showDevice, reload) {
@@ -771,7 +1109,8 @@ function renderCommandTable(box, items, showDevice, reload) {
         h('td', {}, h('code', {}, c.type), h('span', { class: 'sub' }, params)),
         h('td', {}, statusChip(c.status)),
         h('td', {}, result.length ? result : '—'),
-        h('td', { class: 'hide-sm' }, c.created_by || '—'),
+        h('td', { class: 'hide-sm' }, c.schedule ? h('a', { href: '#/schedules' }, c.schedule.name) : null,
+          c.schedule && c.created_by ? h('div', { class: 'sub' }, c.created_by) : (c.schedule ? null : c.created_by || '—')),
         h('td', { class: 'hide-sm' }, when(c.created_at)),
         h('td', {}, cancel));
     })))));
@@ -781,7 +1120,7 @@ function renderCommandTable(box, items, showDevice, reload) {
 
 async function viewProfiles() {
   const profiles = await api.get('/admin/profiles');
-  page('Profiles');
+  page('Profiles', can('admin') ? h('a', { class: 'btn', href: '/api/v1/admin/profiles/export', download: '' }, 'Export all') : null);
   const list = h('div', { class: 'card' }, h('div', { class: 'table-wrap' }, h('table', {},
     h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', { class: 'hide-sm' }, 'Description'), h('th', { class: 'num' }, 'Devices'), h('th', { class: 'hide-sm' }, 'Settings'))),
     h('tbody', {}, profiles.map((p) => h('tr', { class: 'clickable', onclick: () => { location.hash = `#/profiles/${p.id}`; } },
@@ -806,6 +1145,27 @@ async function viewProfiles() {
         },
       }, h('div', { class: 'row' }, field('Name', name), field('Description', desc),
         h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Create'))))));
+
+    const file = h('input', { type: 'file', accept: '.json,application/json', required: true });
+    mainEl.append(h('div', { class: 'card stack-gap' },
+      h('h2', {}, 'Import profiles'),
+      h('p', { class: 'sub' }, 'Load a file made with Export, from this server or another one. Every profile in it is added as a new profile; '
+        + 'names already in use get a number added. Pinned release versions must already be uploaded here.'),
+      h('form', {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          let doc;
+          try { doc = JSON.parse(await file.files[0].text()); } catch (ex) { toast('That file isn\'t valid JSON.', true); return; }
+          try {
+            const r = await api.post('/admin/profiles/import', doc);
+            const skipped = Object.entries(r.skipped_settings);
+            toast(`Imported ${r.created.map((c) => c.name).join(', ')}.`
+              + (skipped.length ? ` Skipped settings this server doesn't know: ${skipped.map(([n, k]) => `${n}: ${k.join(', ')}`).join('; ')}.` : ''), skipped.length > 0);
+            route();
+          } catch (ex) { fail(ex); }
+        },
+      }, h('div', { class: 'row' }, field('Export file', file),
+        h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Import'))))));
   }
 }
 
@@ -814,7 +1174,8 @@ async function viewProfile(id) {
     api.get(`/admin/profiles/${id}`), schema(), api.get('/admin/releases'), api.get('/admin/profiles'),
   ]);
   const editable = can('admin');
-  page(p.name, h('span', { class: 'sub' }, `${p.device_count} device${p.device_count === 1 ? '' : 's'} · policy ${p.policy_version}`));
+  page(p.name, h('span', { class: 'sub' }, `${p.device_count} device${p.device_count === 1 ? '' : 's'} · policy ${p.policy_version}`),
+    editable ? h('a', { class: 'btn', href: `/api/v1/admin/profiles/${id}/export`, download: '' }, 'Export') : null);
   mainEl.querySelector('.page-head').prepend(h('a', { href: '#/profiles', class: 'sub' }, '← Profiles'));
 
   const name = h('input', { type: 'text', value: p.name, disabled: !editable });
@@ -837,7 +1198,8 @@ async function viewProfile(id) {
       h('h2', {}, 'Policy'),
       h('p', { class: 'sub' }, 'Ticked settings are enforced on every device in this profile. Unticked settings use the built-in default. Devices can still override individual settings.'),
       editor.el,
-      editable ? h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: save }, 'Save profile')) : null)));
+      editable ? h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: save }, 'Save profile')) : null),
+    profileHistoryCard(id, defs, editable)));
 
   if (editable && !p.is_default) {
     const moveTo = h('select', {}, profiles.filter((x) => x.id !== p.id).map((x) => h('option', { value: x.id }, x.name)));
@@ -851,6 +1213,40 @@ async function viewProfile(id) {
           },
         }, 'Delete')))));
   }
+}
+
+function profileHistoryCard(id, defs, editable) {
+  const card = h('div', { class: 'card' }, h('h2', {}, 'History'));
+  const labelOf = (key) => (defs.find((d) => d.key === key) || { label: key }).label;
+  const ACTIONS = { created: 'Created', saved: 'Saved', imported: 'Imported', restored: 'Restored', baseline: 'Before history began' };
+  api.get(`/admin/profiles/${id}/versions`).then((r) => {
+    if (!r.items.length) { card.append(h('div', { class: 'empty' }, 'No saved versions yet.')); return; }
+    card.append(h('p', { class: 'sub' }, 'Each save is kept. Restore puts the profile back exactly as it was then; devices pick it up at their next check-in.'),
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'What changed'), h('th', {}))),
+        h('tbody', {}, r.items.map((v) => h('tr', {},
+          h('td', {}, when(v.created_at), h('div', { class: 'sub' }, ACTIONS[v.action] || v.action)),
+          h('td', {}, v.changed_by || '—'),
+          h('td', {}, v.note ? h('div', { class: 'sub' }, v.note) : null,
+            v.changes.length ? h('ul', { class: 'changes' }, v.changes.map((c) => h('li', {},
+              h('strong', {}, c.key === 'name' ? 'Name' : c.key === 'description' ? 'Description' : labelOf(c.key)), ': ',
+              c.change === 'set' ? ['set to ', h('code', {}, fmtValue(c.to))]
+                : c.change === 'unset' ? ['back to default (was ', h('code', {}, fmtValue(c.from)), ')']
+                  : [h('code', {}, fmtValue(c.from)), ' → ', h('code', {}, fmtValue(c.to))]))) : h('span', { class: 'sub' }, 'No setting changes')),
+          h('td', {}, v.is_current ? h('span', { class: 'chip ok' }, 'Current')
+            : editable ? h('button', {
+              class: 'small',
+              onclick: async () => {
+                if (!window.confirm(`Restore this profile to how it was ${new Date(v.created_at).toLocaleString()}?`)) return;
+                try {
+                  const res = await api.post(`/admin/profiles/${id}/versions/${v.id}/restore`);
+                  toast(res.warning || 'Restored. Devices apply it at their next check-in.', !!res.warning);
+                  route();
+                } catch (ex) { fail(ex); }
+              },
+            }, 'Restore') : null)))))));
+  }).catch(() => card.append(h('div', { class: 'empty' }, 'History is available after the 1.4.0 database update.')));
+  return card;
 }
 
 /* --------------------------------------------------------------- enrollment */
@@ -942,6 +1338,118 @@ async function viewCommands() {
   every(20000, () => load().catch(() => {}));
 }
 
+/* ---------------------------------------------------------------- schedules */
+
+const DAY_NAMES = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
+
+function daysLabel(days) {
+  const key = days.join(',');
+  if (key === 'mon,tue,wed,thu,fri,sat,sun') return 'Every day';
+  if (key === 'mon,tue,wed,thu,fri') return 'Weekdays';
+  if (key === 'sat,sun') return 'Weekends';
+  return days.map((d) => DAY_NAMES[d]).join(', ');
+}
+
+async function viewSchedules() {
+  const [r, types, profiles, tags] = await Promise.all([
+    api.get('/admin/schedules'), commandTypes(), api.get('/admin/profiles'), api.get('/admin/tags'),
+  ]);
+  page('Schedules');
+  mainEl.append(h('p', { class: 'sub' }, 'Scheduled commands are queued by ', h('code', {}, 'bin/cron.php'),
+    ', so they go out up to one cron interval (10 minutes) after the set time. A run missed by more than an hour, because cron wasn\'t running, is skipped.'));
+  if (r.cron.stale) {
+    mainEl.append(h('div', { class: 'card banner' }, h('div', {}, h('strong', {}, 'Cron isn\'t running. '),
+      'Nothing here will run until ', h('code', {}, 'php bin/cron.php'), ' is scheduled every 10 minutes.')));
+  }
+  // Besides device commands, a schedule can move devices to another profile
+  const actions = [{ type: 'set_profile', label: 'Switch to profile', params: { profile_id: { type: 'profile', required: true } } }, ...types];
+  const profileName = (pid) => (profiles.find((x) => x.id === pid) || { name: `#${pid}` }).name;
+  const typeLabel = (t) => (actions.find((x) => x.type === t) || { label: t }).label;
+  const editable = can('operator');
+
+  const list = h('div', { class: 'card' });
+  if (!r.items.length) list.append(h('div', { class: 'empty' }, 'No schedules yet.'));
+  else {
+    list.append(h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Command'), h('th', {}, 'Devices'), h('th', {}, 'When'),
+        h('th', {}, 'Next run'), h('th', { class: 'hide-sm' }, 'Last run'), h('th', {}))),
+      h('tbody', {}, r.items.map((s) => {
+        const params = s.type === 'set_profile' ? ` ${profileName(s.params.profile_id)}`
+          : Object.keys(s.params).length ? ' ' + JSON.stringify(s.params) : '';
+        return h('tr', {},
+          h('td', {}, s.name, s.enabled ? null : [' ', h('span', { class: 'chip' }, 'Paused')]),
+          h('td', {}, typeLabel(s.type), h('span', { class: 'sub' }, params)),
+          h('td', {}, s.target_label),
+          h('td', {}, daysLabel(s.days), ' at ', s.time, h('div', { class: 'sub' }, s.timezone)),
+          h('td', {}, s.enabled && s.next_run_at ? h('span', { title: dateTime(s.next_run_at) }, dateTime(s.next_run_at)) : '—'),
+          h('td', { class: 'hide-sm' }, s.last_run_at ? [when(s.last_run_at), h('div', { class: 'sub' }, s.last_result || '')] : 'never'),
+          h('td', {}, editable ? h('div', { class: 'actions' },
+            h('button', {
+              class: 'small',
+              onclick: async () => {
+                try { const x = await api.post(`/admin/schedules/${s.id}/run`); toast(x.result); route(); } catch (ex) { fail(ex); }
+              },
+            }, 'Run now'),
+            h('button', {
+              class: 'small',
+              onclick: async () => {
+                try { await api.patch(`/admin/schedules/${s.id}`, { enabled: !s.enabled }); route(); } catch (ex) { fail(ex); }
+              },
+            }, s.enabled ? 'Pause' : 'Resume'),
+            h('button', {
+              class: 'small danger',
+              onclick: async () => {
+                if (!window.confirm(`Delete schedule ${s.name}?`)) return;
+                try { await api.del(`/admin/schedules/${s.id}`); route(); } catch (ex) { fail(ex); }
+              },
+            }, 'Delete')) : null));
+      })))));
+  }
+  mainEl.append(list);
+  if (!editable) return;
+
+  // New schedule
+  const name = h('input', { type: 'text', required: true, placeholder: 'e.g. Nightly reload' });
+  const target = h('select', {},
+    h('option', { value: 'all' }, 'All devices'),
+    h('optgroup', { label: 'Profile' }, profiles.map((p) => h('option', { value: `profile:${p.id}` }, p.name))),
+    tags.length ? h('optgroup', { label: 'Tag' }, tags.map((t) => h('option', { value: `tag:${t.tag}` }, `${t.tag} (${t.devices})`))) : null);
+  const dayBoxes = Object.keys(DAY_NAMES).map((k) => [k, h('input', { type: 'checkbox', checked: true })]);
+  const days = h('div', { class: 'days' }, dayBoxes.map(([k, box]) => h('label', { class: 'check' }, box, DAY_NAMES[k])));
+  const time = h('input', { type: 'time', value: '05:00', required: true });
+  const tz = h('input', { type: 'text', value: r.timezone, required: true, list: 'tz-list' });
+  let tzList = null;
+  try {
+    tzList = h('datalist', { id: 'tz-list' }, Intl.supportedValuesOf('timeZone').map((z) => h('option', { value: z })));
+  } catch (e) { /* older browsers: free text */ }
+  const ttl = h('input', { type: 'number', min: 1, max: 720, placeholder: 'server default' });
+
+  const extra = h('div', {},
+    h('div', { class: 'row' }, field('Name', name), field('Devices', target)),
+    field('Days', days),
+    h('div', { class: 'row' }, field('Time', time), field('Time zone', tz, 'For example Europe/London. Daylight saving is handled.'), tzList,
+      field('Expires after (hours)', ttl, 'How long an offline device can still pick the command up.')));
+
+  mainEl.append(h('div', { class: 'card stack-gap' }, h('h2', {}, 'New schedule'),
+    commandForm(actions, async (type, params) => {
+      const [kind, value] = target.value.split(/:(.*)/);
+      const t = kind === 'profile' ? { profile_id: parseInt(value, 10) } : kind === 'tag' ? { tag: value } : { all: true };
+      await api.post('/admin/schedules', {
+        name: name.value,
+        type,
+        params,
+        target: t,
+        days: dayBoxes.filter(([, b]) => b.checked).map(([k]) => k),
+        time: time.value,
+        timezone: tz.value,
+        ttl_hours: ttl.value === '' ? null : parseInt(ttl.value, 10),
+      });
+      toast('Schedule created.');
+      route();
+    }, { label: 'Create schedule', extra, profiles }),
+    h('p', { class: 'sub' }, 'Switch to profile moves the chosen devices to another profile, e.g. a Night profile with a different start page at 22:00 and back to Day at 07:00. Make two schedules for the two directions, targeting a tag.')));
+}
+
 /* ----------------------------------------------------------------- releases */
 
 async function viewReleases() {
@@ -954,13 +1462,15 @@ async function viewReleases() {
   else {
     list.append(h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, h('th', {}, 'Version'), h('th', { class: 'num hide-sm' }, 'Code'), h('th', { class: 'hide-sm' }, 'Size'), h('th', { class: 'hide-sm' }, 'SHA-256'),
-        h('th', { class: 'num hide-sm' }, 'Devices on it'), h('th', { class: 'hide-sm' }, 'Uploaded'), h('th', {}, 'Offered'), h('th', {}))),
+        h('th', { class: 'num hide-sm' }, 'Devices on it'), h('th', { class: 'num hide-sm', title: 'Devices whose profile, ring or override points at this release' }, 'Targeted'),
+        h('th', { class: 'hide-sm' }, 'Uploaded'), h('th', {}, 'Offered'), h('th', {}))),
       h('tbody', {}, releases.map((r) => h('tr', {},
         h('td', {}, h('strong', {}, r.version_name), r.notes ? h('div', { class: 'sub' }, r.notes) : null),
         h('td', { class: 'num hide-sm' }, r.version_code),
         h('td', { class: 'hide-sm' }, bytes(r.size)),
         h('td', { class: 'hide-sm' }, h('code', { title: r.sha256 }, r.sha256.slice(0, 12) + '…')),
         h('td', { class: 'num hide-sm' }, r.devices_on_version ?? 0),
+        h('td', { class: 'num hide-sm' }, r.devices_targeted ?? 0),
         h('td', { class: 'hide-sm' }, when(r.created_at), r.uploaded_by ? h('div', { class: 'sub' }, r.uploaded_by) : null),
         h('td', {}, r.active ? h('span', { class: 'chip ok' }, 'Yes') : h('span', { class: 'chip' }, 'Withdrawn')),
         h('td', {}, can('admin') ? h('div', { class: 'actions' },
@@ -976,7 +1486,7 @@ async function viewReleases() {
             },
           }, 'Delete')) : null)))))));
   }
-  mainEl.append(list);
+  mainEl.append(list, releaseRingsCard(releases));
 
   if (can('admin')) {
     const file = h('input', { type: 'file', accept: '.apk,application/vnd.android.package-archive', required: true });
@@ -1006,6 +1516,53 @@ async function viewReleases() {
   }
 }
 
+// Staged rollouts: a release per tag, e.g. "canary" gets the newest APK before everyone else
+function releaseRingsCard(releases) {
+  const card = h('div', { class: 'card stack-gap' }, h('h2', {}, 'Staged rollouts'),
+    h('p', { class: 'sub' }, 'Give devices with a tag their own release, ahead of (or behind) their profile. Tag a few tablets canary, '
+      + 'point the canary ring at a new version, watch them update, then move the profiles over. A device\'s own override still wins; '
+      + 'a device in several rings follows the newest release.'));
+  const box = h('div', {});
+  card.append(box);
+  const load = async () => {
+    const [rings, tags] = await Promise.all([api.get('/admin/releases/rings'), api.get('/admin/tags')]);
+    clear(box);
+    if (rings.length) {
+      box.append(h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Tag'), h('th', {}, 'Release'), h('th', { class: 'num' }, 'Devices'), h('th', {}, 'Progress'), h('th', {}))),
+        h('tbody', {}, rings.map((r) => h('tr', {},
+          h('td', {}, h('a', { class: 'chip tag', href: `#/devices?tag=${encodeURIComponent(r.tag)}` }, r.tag)),
+          h('td', {}, r.release, r.release === 'latest' && r.resolves_to ? h('span', { class: 'sub' }, ` (${r.resolves_to})`) : null),
+          h('td', { class: 'num' }, r.devices),
+          h('td', {}, r.devices ? `${r.on_release} of ${r.devices} on it` + (r.newer ? `, ${r.newer} newer` : '') : '—'),
+          h('td', {}, can('admin') ? h('button', {
+            class: 'small danger',
+            onclick: async () => {
+              if (!window.confirm(`Remove the ${r.tag} ring? Those devices go back to their profile's release.`)) return;
+              try { await api.del(`/admin/releases/rings/${encodeURIComponent(r.tag)}`); load().catch(fail); } catch (ex) { fail(ex); }
+            },
+          }, 'Remove') : null)))))));
+    } else box.append(h('div', { class: 'empty' }, 'No rings. Every device follows its profile\'s release.'));
+    if (!can('admin')) return;
+    const tag = h('input', { type: 'text', list: 'ring-tags', placeholder: 'e.g. canary', required: true });
+    const rel = h('select', {}, ['latest', ...releases.map((r) => r.version_name)].map((v) => h('option', { value: v }, v)));
+    box.append(h('h3', {}, 'Set a ring'), h('datalist', { id: 'ring-tags' }, tags.map((t) => h('option', { value: t.tag }))),
+      h('form', {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          try {
+            await api.req('PUT', `/admin/releases/rings/${encodeURIComponent(tag.value.trim().toLowerCase())}`, { release: rel.value });
+            toast('Ring saved. Its devices get the release at their next check-in.');
+            load().catch(fail);
+          } catch (ex) { fail(ex); }
+        },
+      }, h('div', { class: 'row' }, field('Tag', tag), field('Release', rel),
+        h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Save ring')))));
+  };
+  load().catch(() => box.append(h('div', { class: 'empty' }, 'Rings are available after the 1.4.0 database update.')));
+  return card;
+}
+
 /* -------------------------------------------------------------------- users */
 
 async function viewUsers() {
@@ -1017,10 +1574,12 @@ async function viewUsers() {
     h('tbody', {}, users.map((u) => h('tr', {},
       h('td', {}, u.username, u.id === state.me.id ? h('span', { class: 'sub' }, ' (you)') : null,
         u.email && u.email !== u.username ? h('div', { class: 'sub' }, u.email) : null),
-      h('td', { class: 'hide-sm' }, u.sso ? u.sso.label : 'Password'),
+      h('td', { class: 'hide-sm' }, u.sso ? u.sso.label : 'Password',
+        !u.sso ? [' ', u.two_factor ? h('span', { class: 'chip ok', title: 'Two-factor sign-in is on' }, '2FA') : h('span', { class: 'chip', title: 'Password only' }, 'no 2FA')] : null),
       h('td', {}, u.role_managed
         ? h('span', { title: `Set by ${u.sso.label} at each sign-in` }, u.role, h('div', { class: 'sub' }, `from ${u.sso.label}`))
-        : roleSel(u.role, async (e) => { try { await api.patch(`/admin/users/${u.id}`, { role: e.target.value }); toast('Role changed.'); } catch (ex) { fail(ex); route(); } })),
+        : roleSel(u.role, async (e) => { try { await api.patch(`/admin/users/${u.id}`, { role: e.target.value }); toast('Role changed.'); } catch (ex) { fail(ex); route(); } }),
+        u.scope_tags ? h('div', { class: 'sub' }, `only ${u.scope_tags.join(', ')}`) : null),
       h('td', { class: 'hide-sm' }, when(u.last_login_at)),
       h('td', {}, u.disabled ? h('span', { class: 'chip bad' }, 'Disabled') : h('span', { class: 'chip ok' }, 'Active')),
       h('td', {}, h('div', { class: 'actions' },
@@ -1032,10 +1591,26 @@ async function viewUsers() {
             try { await api.patch(`/admin/users/${u.id}`, { password: pw }); toast('Password changed.'); } catch (ex) { fail(ex); }
           },
         }, 'Set password'),
+        u.two_factor && u.id !== state.me.id ? h('button', {
+          class: 'small',
+          onclick: async () => {
+            if (!window.confirm(`Turn off two-factor sign-in for ${u.username}? They can then sign in with just their password, and set it up again under Your account.`)) return;
+            try { await api.patch(`/admin/users/${u.id}`, { reset_2fa: true }); toast('Two-factor sign-in reset.'); route(); } catch (ex) { fail(ex); }
+          },
+        }, 'Reset 2FA') : null,
         h('button', {
           class: 'small',
           onclick: async () => { try { await api.patch(`/admin/users/${u.id}`, { disabled: !u.disabled }); route(); } catch (ex) { fail(ex); } },
         }, u.disabled ? 'Enable' : 'Disable'),
+        u.role !== 'admin' ? h('button', {
+          class: 'small',
+          onclick: async () => {
+            const v = window.prompt(`Limit ${u.username} to devices with any of these tags (comma separated). Leave empty for every device.`,
+              (u.scope_tags || []).join(', '));
+            if (v === null) return;
+            try { await api.patch(`/admin/users/${u.id}`, { scope_tags: parseTags(v) }); toast('Device access changed.'); route(); } catch (ex) { fail(ex); }
+          },
+        }, 'Devices…') : null,
         u.id !== state.me.id ? h('button', {
           class: 'small danger',
           onclick: async () => {
@@ -1047,15 +1622,22 @@ async function viewUsers() {
   const name = h('input', { type: 'text', required: true, autocomplete: 'off' });
   const pw = h('input', { type: 'password', required: true, autocomplete: 'new-password', minlength: 10 });
   const role = roleSel('operator');
+  const scopeInput = h('input', { type: 'text', placeholder: 'every device' });
   mainEl.append(h('div', { class: 'card stack-gap' }, h('h2', {}, 'Add a user'),
-    h('p', { class: 'sub' }, 'viewer: read only. operator: rename devices, change overrides, send commands, create enrollment codes. admin: everything, including profiles, releases and users.'),
+    h('p', { class: 'sub' }, 'viewer: read only. operator: rename devices, change overrides, send commands, create enrollment codes. admin: everything, including profiles, releases and users. '
+      + 'Operators and viewers can be limited to devices with certain tags (e.g. one building); they then can\'t see enrollment codes or schedules.'),
     h('p', { class: 'sub' }, 'This adds a password user. Single sign-on users are added automatically the first time they sign in.'),
     h('form', {
       onsubmit: async (e) => {
         e.preventDefault();
-        try { await api.post('/admin/users', { username: name.value, password: pw.value, role: role.value }); toast('User added.'); route(); } catch (ex) { fail(ex); }
+        try {
+          await api.post('/admin/users', { username: name.value, password: pw.value, role: role.value, scope_tags: parseTags(scopeInput.value) });
+          toast('User added.');
+          route();
+        } catch (ex) { fail(ex); }
       },
     }, h('div', { class: 'row' }, field('Username', name), field('Password', pw), field('Role', role),
+      field('Only devices tagged', scopeInput),
       h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Add'))))));
 }
 
@@ -1140,12 +1722,12 @@ async function viewAccount() {
   if (state.me.sso) {
     mainEl.append(h('div', { class: 'card' }, h('h2', {}, 'Single sign-on'),
       h('p', {}, `Signed in as ${state.me.username} (${state.me.role}) with ${state.me.sso.label}. `,
-        'Your password and, if roles come from there, your role are managed by your organisation\'s identity provider.')));
+        'Your password, two-factor sign-in and, if roles come from there, your role are managed by your organisation\'s identity provider.')));
     return;
   }
   const cur = h('input', { type: 'password', autocomplete: 'current-password', required: true });
   const nw = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: 10 });
-  mainEl.append(h('div', { class: 'card' }, h('h2', {}, 'Change password'),
+  mainEl.append(h('div', { class: 'stack' }, h('div', { class: 'card' }, h('h2', {}, 'Change password'),
     h('p', { class: 'sub' }, `Signed in as ${state.me.username} (${state.me.role}).`),
     h('form', {
       onsubmit: async (e) => {
@@ -1157,7 +1739,86 @@ async function viewAccount() {
         } catch (ex) { fail(ex); }
       },
     }, h('div', { class: 'row' }, field('Current password', cur), field('New password', nw, 'At least 10 characters.'),
-      h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Change'))))));
+      h('div', { class: 'field' }, h('button', { class: 'primary', type: 'submit' }, 'Change'))))),
+  twoFactorCard()));
+}
+
+function recoveryCodesBox(codes) {
+  return h('div', {}, h('p', {}, h('strong', {}, 'Save these recovery codes now. They won\'t be shown again. '),
+    'Each one signs you in once if you lose your phone.'),
+  h('div', { class: 'secret-box recovery' }, codes.map((c) => h('div', {}, c))));
+}
+
+function twoFactorCard() {
+  const card = h('div', { class: 'card' }, h('h2', {}, 'Two-factor sign-in'));
+  const body = h('div', {});
+  card.append(body);
+
+  const passwordAction = (label, cls, run) => {
+    const pw = h('input', { type: 'password', autocomplete: 'current-password', required: true });
+    return h('form', { onsubmit: async (e) => { e.preventDefault(); try { await run(pw.value); } catch (ex) { fail(ex); } } },
+      h('div', { class: 'row' }, field('Your password', pw), h('div', { class: 'field' }, h('button', { class: cls, type: 'submit' }, label))));
+  };
+
+  const showOn = () => {
+    clear(body).append(
+      h('p', {}, h('span', { class: 'chip ok' }, 'On'), ' Signing in needs your password and a code from your authenticator app. ',
+        `${state.me.recovery_codes_left ?? 0} recovery code${state.me.recovery_codes_left === 1 ? '' : 's'} left.`),
+      h('h3', {}, 'New recovery codes'),
+      passwordAction('Make new codes', '', async (password) => {
+        const r = await api.post('/admin/session/2fa/recovery', { password });
+        state.me.recovery_codes_left = r.recovery_codes.length;
+        showOn();
+        body.append(recoveryCodesBox(r.recovery_codes));
+      }),
+      h('h3', {}, 'Turn off'),
+      passwordAction('Turn off two-factor sign-in', 'danger', async (password) => {
+        await api.post('/admin/session/2fa/disable', { password });
+        state.me.two_factor = false;
+        toast('Two-factor sign-in is off.');
+        showOff();
+      }));
+  };
+
+  const showOff = () => {
+    const start = h('button', { class: 'primary' }, 'Set up');
+    start.addEventListener('click', async () => {
+      let setup;
+      try { setup = await api.post('/admin/session/2fa/setup'); } catch (ex) { fail(ex); return; }
+      let qr;
+      try { qr = window.QR.svg(setup.uri); } catch (e) { qr = null; }
+      const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: 6, class: 'code-input' });
+      clear(body).append(
+        h('ol', {},
+          h('li', {}, 'Open an authenticator app (Microsoft Authenticator, Google Authenticator, 1Password, Bitwarden…) and scan this code.'),
+          h('li', {}, 'Type the 6-digit code it shows.')),
+        h('div', { class: 'enroll-card' }, qr,
+          h('div', {}, h('div', { class: 'sub' }, 'Can\'t scan? Enter this key by hand:'), h('div', { class: 'secret-box' }, setup.secret.match(/.{1,4}/g).join(' ')))),
+        h('form', {
+          onsubmit: async (e) => {
+            e.preventDefault();
+            try {
+              const r = await api.post('/admin/session/2fa/enable', { code: code.value });
+              state.me.two_factor = true;
+              state.me.recovery_codes_left = r.recovery_codes.length;
+              toast('Two-factor sign-in is on.');
+              showOn();
+              body.append(recoveryCodesBox(r.recovery_codes));
+            } catch (ex) { fail(ex); }
+          },
+        }, h('div', { class: 'row' }, field('Code from the app', code),
+          h('div', { class: 'field' }, h('div', { class: 'actions' },
+            h('button', { class: 'primary', type: 'submit' }, 'Turn on'),
+            h('button', { type: 'button', onclick: showOff }, 'Cancel'))))));
+      code.focus();
+    });
+    clear(body).append(
+      h('p', {}, h('span', { class: 'chip warn' }, 'Off'), ' Add a code from an authenticator app on your phone to your password, so a stolen password alone can\'t get in.'),
+      start);
+  };
+
+  if (state.me.two_factor) showOn(); else showOff();
+  return card;
 }
 
 /* -------------------------------------------------------------------- start */
@@ -1171,7 +1832,32 @@ function signedIn(r) {
 
 async function start() {
   renderShell();
+  startSideRefresh();
   await route();
+}
+
+// Keeps the sidebar's "Cron: 4m ago" current on every page: re-render the relative
+// time each minute, and fetch fresh server status every 5 minutes.
+let sideTimer = null;
+function startSideRefresh() {
+  if (sideTimer) clearInterval(sideTimer);
+  let ticks = 0;
+  sideTimer = setInterval(async () => {
+    if (!state.me) { clearInterval(sideTimer); sideTimer = null; return; }
+    if (document.hidden) return;
+    if (++ticks % 5 === 0) {
+      try {
+        const r = await api.get('/admin/session');
+        state.server = r.server;
+      } catch (e) { return; }
+    }
+    refreshCronLine();
+  }, 60000);
+}
+
+function refreshCronLine() {
+  const side = document.getElementById('cron-status');
+  if (side && state.server && state.server.cron) clear(side).append(cronLine(state.server.cron));
 }
 
 window.addEventListener('hashchange', route);

@@ -11,6 +11,61 @@ final class Releases
         return Config::storage('apk');
     }
 
+    // ---- Release rings: a release chosen per device tag, for staged rollouts ----
+
+    /** @var array<string, string>|null tag => 'latest' or version name, per request */
+    private static ?array $rings = null;
+
+    /** @return array<string, string> */
+    public static function rings(): array
+    {
+        if (self::$rings === null) {
+            self::$rings = Migrator::has('tag_releases')
+                ? array_column(Db::all('SELECT tag, release_version FROM tag_releases'), 'release_version', 'tag')
+                : [];
+        }
+        return self::$rings;
+    }
+
+    public static function forgetRings(): void
+    {
+        self::$rings = null;
+    }
+
+    /**
+     * The ring that applies to a device with these tags. When several of its tags have
+     * rings, the newest release wins ("latest" beats any pinned version), so a device
+     * in both "canary" and "lobby" follows the canary.
+     *
+     * @param list<string> $tags
+     * @return array{tag: string, release: string}|null
+     */
+    public static function ringFor(array $tags): ?array
+    {
+        $rings = self::rings();
+        $best = null;
+        $bestCode = -1;
+        foreach ($tags as $tag) {
+            if (!isset($rings[$tag])) {
+                continue;
+            }
+            $code = self::versionRank($rings[$tag]);
+            if ($code > $bestCode) {
+                $best = ['tag' => $tag, 'release' => $rings[$tag]];
+                $bestCode = $code;
+            }
+        }
+        return $best;
+    }
+
+    /** Sort key for a release choice: "latest" highest, unknown versions lowest. */
+    private static function versionRank(string $release): int
+    {
+        static $codes = null;
+        $codes ??= array_map('intval', array_column(Db::all('SELECT version_name, version_code FROM releases'), 'version_code', 'version_name'));
+        return $release === 'latest' ? PHP_INT_MAX : ($codes[$release] ?? 0);
+    }
+
     /** The release a device should be on under its policy, or null. */
     public static function targetFor(array $policy): ?array
     {

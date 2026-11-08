@@ -3,3 +3,4 @@ config/config.php
 !/storage/.gitignore
 !/storage/.htaccess
 .DS_Store
+__pycache__/

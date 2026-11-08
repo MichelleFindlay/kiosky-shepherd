@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-// Housekeeping. Run every few minutes from cron, e.g.
+// Housekeeping, scheduled commands and offline alerts. Run every 10 minutes from cron, e.g.
 //   */10 * * * *  php /srv/kiosky-shepherd/bin/cron.php
 
 if (PHP_SAPI !== 'cli') {
@@ -13,10 +13,34 @@ require dirname(__DIR__) . '/src/bootstrap.php';
 use Shepherd\Config;
 use Shepherd\Db;
 
+\Shepherd\Migrator::autoRun();
+
 $days = max(1, (int) Config::get('retention_days', 90));
 
 $expired = Db::run("UPDATE commands SET status = 'expired', completed_at = NOW()
                      WHERE status IN ('pending', 'delivered') AND expires_at < NOW()")->rowCount();
+
+// Scheduled commands and offline alerts need the 1.3.0 database update
+$extra = [];
+if (\Shepherd\Migrator::tableExists('scheduled_commands')) {
+    try {
+        $s = \Shepherd\Schedules::runDue();
+        if ($s['ran'] || $s['skipped']) {
+            $extra[] = "ran {$s['ran']} schedules" . ($s['skipped'] ? ", skipped {$s['skipped']} missed" : '');
+        }
+    } catch (\Throwable $e) {
+        error_log('[kiosky-shepherd] cron schedules: ' . $e->getMessage());
+        $extra[] = 'schedules failed: ' . $e->getMessage();
+    }
+    try {
+        $extra[] = \Shepherd\Alerts::check();
+    } catch (\Throwable $e) {
+        error_log('[kiosky-shepherd] cron alerts: ' . $e->getMessage());
+        $extra[] = 'alerts failed: ' . $e->getMessage();
+    }
+} else {
+    $extra[] = 'database update pending: schedules and alerts are off';
+}
 
 // Old finished commands, and their screenshots
 $old = Db::all("SELECT id, attachment FROM commands
@@ -33,12 +57,17 @@ $commands = Db::run("DELETE FROM commands WHERE status IN ('done', 'failed', 'ex
 $events = Db::run('DELETE FROM device_events WHERE created_at < NOW() - INTERVAL :d DAY', ['d' => $days])->rowCount();
 $audit = Db::run('DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL :d DAY', ['d' => max($days, 365)])->rowCount();
 $limits = Db::run('DELETE FROM rate_limits WHERE window_start < NOW() - INTERVAL 1 DAY')->rowCount();
+// Daily health summaries are small; keep at least a year for the history charts
+if (\Shepherd\Migrator::tableExists('device_daily')) {
+    Db::run('DELETE FROM device_daily WHERE stat_date < CURDATE() - INTERVAL :d DAY', ['d' => max($days, 365)]);
+}
+\Shepherd\Devices::pruneLiveFrames();
 if (\Shepherd\Migrator::tableExists('sso_logins')) {
     Db::run('DELETE FROM sso_logins WHERE created_at < NOW() - INTERVAL 1 HOUR');
 }
 
 $summary = sprintf('expired %d commands; pruned %d commands, %d events, %d audit rows, %d rate-limit rows',
-    $expired, $commands, $events, $audit, $limits);
+    $expired, $commands, $events, $audit, $limits) . ($extra ? '; ' . implode('; ', $extra) : '');
 
 // Shown on the console's Overview page, so admins can tell cron is running
 @file_put_contents(Config::storage('cron-last-run.json'),

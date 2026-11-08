@@ -4,12 +4,17 @@ declare(strict_types=1);
 
 namespace Shepherd\Api\Admin;
 
+use Shepherd\Alerts;
+use Shepherd\Audit;
 use Shepherd\Auth\AdminAuth;
 use Shepherd\Config;
 use Shepherd\Db;
 use Shepherd\Devices;
+use Shepherd\Health;
+use Shepherd\Http\HttpError;
 use Shepherd\Http\Request;
 use Shepherd\Http\Response;
+use Shepherd\Scope;
 use Shepherd\Util;
 
 final class OverviewApi
@@ -17,9 +22,11 @@ final class OverviewApi
     /** GET /api/v1/admin/overview */
     public static function overview(Request $req): Response
     {
-        AdminAuth::require($req);
-        $devices = array_map(static fn ($d) => Devices::present($d),
-            Db::all(Devices::SELECT . " WHERE d.status = 'active'"));
+        $p = AdminAuth::require($req);
+        [$scope, $scopeParams] = Scope::condition($p);
+        $rows = Db::all(Devices::select() . " WHERE d.status = 'active' AND $scope", $scopeParams);
+        $uptime = Health::uptime($rows, 7);
+        $devices = array_map(static fn ($d) => Devices::present($d) + ['uptime_7d' => $uptime[(int) $d['id']] ?? null], $rows);
 
         $versions = [];
         $attention = [];
@@ -47,6 +54,10 @@ final class OverviewApi
             if (!empty($state['page_error'])) {
                 $reasons[] = 'page error';
             }
+            // Only once a device has a day of history, so a new tablet isn't flagged for its first hours
+            if ($d['uptime_7d'] !== null && $d['uptime_7d'] < 90 && strtotime((string) $d['enrolled_at']) < time() - 86400) {
+                $reasons[] = "online only {$d['uptime_7d']}% in the last 7 days";
+            }
             if ($reasons !== []) {
                 $attention[] = ['id' => $d['id'], 'name' => $d['name'], 'reasons' => $reasons,
                     'last_seen_at' => $d['last_seen_at']];
@@ -62,9 +73,11 @@ final class OverviewApi
             ],
             'app_versions' => $versions,
             'attention' => array_slice($attention, 0, 50),
-            'pending_commands' => (int) Db::value("SELECT COUNT(*) FROM commands WHERE status IN ('pending', 'delivered')"),
+            'pending_commands' => (int) Db::value("SELECT COUNT(*) FROM commands c JOIN devices d ON d.id = c.device_id
+                                                    WHERE c.status IN ('pending', 'delivered') AND $scope", $scopeParams),
             'profiles' => (int) Db::value('SELECT COUNT(*) FROM profiles'),
             'cron' => self::cronStatus(),
+            'alerts' => Alerts::summary(),
             'recent_events' => array_map(static fn ($e) => [
                 'id' => (int) $e['id'],
                 'device_id' => (int) $e['device_id'],
@@ -72,12 +85,25 @@ final class OverviewApi
                 'type' => $e['type'],
                 'data' => Db::decode($e['data'], null),
                 'created_at' => Util::iso($e['created_at']),
-            ], Db::all('SELECT e.*, d.name FROM device_events e JOIN devices d ON d.id = e.device_id ORDER BY e.id DESC LIMIT 20')),
+            ], Db::all("SELECT e.*, d.name FROM device_events e JOIN devices d ON d.id = e.device_id
+                         WHERE $scope ORDER BY e.id DESC LIMIT 20", $scopeParams)),
         ]);
     }
 
+    /** POST /api/v1/admin/alerts/test  sends a test message to every alert channel */
+    public static function testAlerts(Request $req): Response
+    {
+        $p = AdminAuth::require($req, 'admin');
+        if (!Alerts::configured()) {
+            throw HttpError::conflict('No alert channels are set up. Add email addresses or webhooks under \'alerts\' in config/config.php.');
+        }
+        $results = Alerts::sendAll('test', 'Test alert', "This is a test from Kiosky Shepherd, sent by {$p->name}. Offline and back-online alerts will arrive like this.");
+        Audit::log($p, 'alerts.tested', null, null, ['results' => $results]);
+        return Response::json(['results' => $results]);
+    }
+
     /** When bin/cron.php last finished. Stale after 30 minutes (it should run every 10). */
-    private static function cronStatus(): array
+    public static function cronStatus(): array
     {
         $data = json_decode((string) @file_get_contents(Config::storage('cron-last-run.json')), true);
         $at = is_array($data) && is_string($data['at'] ?? null) ? $data['at'] : null;
