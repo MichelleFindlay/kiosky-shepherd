@@ -157,10 +157,23 @@ straight after finishing any command.
   Android 10+ (`true` below 10), and `install_permission` is
   `canRequestPackageInstalls()`. When either is `false` the overview flags the
   device, because start on boot or updates won't work until someone grants it.
+  Kiosky 1.2.0+ also sends the lockdown keys below (§5.4); the overview flags a
+  device whose lockdown can be escaped.
+
+  | Key | Meaning |
+  | --- | --- |
+  | `lockdown` | Lockdown is wanted (policy `lockdown`, or the local toggle when unmanaged) |
+  | `lockdown_mode` | `owner` (Kiosky is device owner), `mdm` (an MDM allows Kiosky in lock task mode) or `partial` |
+  | `lock_task` | The app is in lock task mode or screen pinning right now |
+  | `device_owner` | Kiosky is the device owner |
+  | `accessibility_helper` | Kiosky's accessibility helper is running (partial lockdown) |
+  | `default_home` | Kiosky is the default Home app |
 - `events`: anything that happened since the last successful check-in, oldest
   first, at most 50. Keep them queued locally until a check-in succeeds.
   Suggested types: `page_error`, `page_loaded`, `policy_applied`,
-  `update_started`, `update_failed`, `app_started`, `crash`.
+  `update_started`, `update_failed`, `app_started`, `crash`. Kiosky also sends
+  `navigation_blocked`, `pin_failed`, and `lockdown_on` / `lockdown_off` (with
+  `mode` and, when the policy changed it, `source: "policy"`).
 
 **200 OK**
 
@@ -229,6 +242,7 @@ success.
   "keep_screen_on": true,
   "orientation": "auto",
   "allow_exit": false,
+  "lockdown": false,
 
   "toolbar": {
     "mode": "hidden",
@@ -267,6 +281,7 @@ older apps. If a key is missing, use the default shown above.
 | `keep_screen_on` | Add or clear `FLAG_KEEP_SCREEN_ON` and `setKeepScreenOn()`. |
 | `orientation` | `setRequestedOrientation()`: `auto` → `SCREEN_ORIENTATION_UNSPECIFIED` (-1), `portrait` → 1, `landscape` → 0, `reverse_portrait` → 9, `reverse_landscape` → 8. |
 | `allow_exit` | If `false`, `onBackPressed()` on the first page does nothing instead of calling `super.onBackPressed()`. |
+| `lockdown` | Keep the tablet locked to Kiosky (§5.4). Replaces the local Lockdown toggle while managed: the app turns lockdown on or off whenever this changes. The PIN-unlocked toolbar may show the lockdown checklist, but can't turn it off. Apps before 1.4.0 ignore it. |
 | `toolbar.mode` | `hidden`: an edge swipe still reveals the system bars (Android always allows that) but the Kiosky toolbar stays hidden. `limited`: show only **Reload** and **Help**. `full`: also the address box and **Go**. Addresses typed in `full` mode are **temporary**: open them, but never save them; restart, `go_home` or a policy change returns to `url`. The **Update** and **Start on boot** buttons and the unmanaged **Enroll** button are never shown while managed. |
 | `toolbar.timeout_seconds` | Replaces `BAR_TIMEOUT_MS` (currently 15 s). |
 | `toolbar.pin` | `null`: no local unlock. Otherwise a technician can unlock the full toolbar (§5.3). |
@@ -282,8 +297,9 @@ When `toolbar.pin` is not null:
    that corner.
 2. Check the entered digits with
    `PBKDF2WithHmacSHA256(pin, base64decode(salt), iterations, 256 bits)` and
-   compare to `base64decode(hash)` in constant time. `javax.crypto.SecretKeyFactory`
-   provides this on every Android version Kiosky supports.
+   compare to `base64decode(hash)` in constant time. `SecretKeyFactory` only has
+   `PBKDF2WithHmacSHA256` from Android 8, so Kiosky computes PBKDF2 itself on
+   `Mac.getInstance("HmacSHA256")`, which works on every version it supports.
 3. If they match, show the **full** toolbar plus a **Device info** button (server,
    device name and id, policy version, last check-in, permission status) and,
    where permissions are missing, buttons to open the relevant settings screens.
@@ -293,12 +309,26 @@ When `toolbar.pin` is not null:
 The PIN deters passers-by. Anyone who can root the tablet can brute-force a
 short PIN from the stored hash, so admins should treat it accordingly.
 
-### 5.4 Things the app cannot lock
+### 5.4 Lockdown
 
-Without being the *device owner* (Android Enterprise), an app can't block the
-system bars, the Home and Recents buttons, or Settings. Recommend Android
-**app pinning**, as the help page already does. A future protocol version may add
-`lock_task` for device-owner installs.
+With policy `lockdown: true`, the app keeps the tablet locked to Kiosky. How
+completely depends on the device, reported as `lockdown_mode`:
+
+- **`owner`**: Kiosky is the device owner (`adb shell dpm set-device-owner
+  uk.lp0.ha/kiosky.AdminReceiver`). It whitelists itself for lock task mode with no
+  features, disables the status bar and makes itself the persistent Home app.
+  Nothing on the device leads out except Kiosky's own menu.
+- **`mdm`**: another MDM is device owner and allows Kiosky in lock task mode
+  (`isLockTaskPermitted`). Kiosky starts lock task; the MDM decides its features.
+- **`partial`**: neither. Kiosky layers what Android allows: screen pinning, a
+  status bar blocker (Android 5.1–7.1), closing the shade when it opens, returning
+  to the front when left, Kiosky as the Home app, and an optional accessibility
+  helper that keeps Kiosky in front and closes the shade on Android 12+. The power
+  menu and lock screen still work, and the shade or launcher may flash briefly.
+
+Kiosky's own menu (an edge swipe, or five taps in the top-left corner) is the only
+way out. While managed, only the PIN-unlocked toolbar can open the settings screens
+that strengthen a partial lockdown.
 
 ## 6. Updates
 

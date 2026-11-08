@@ -19,8 +19,8 @@ locked down.
   scripts, and a full **audit log**
 
 The Kiosky app needs to implement the client side, which is specified in
-[docs/PROTOCOL.md](docs/PROTOCOL.md). Released Kiosky versions (up to 1.0.2)
-can't enroll yet.
+[docs/PROTOCOL.md](docs/PROTOCOL.md). Kiosky 1.1.0 and later can enroll; the
+**Lock the tablet to Kiosky** setting needs Kiosky 1.4.0 or later.
 
 ## Requirements
 

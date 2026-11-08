@@ -35,6 +35,14 @@ final class OverviewApi
             if (($state['start_on_boot_permission'] ?? true) === false) {
                 $reasons[] = 'missing "Display over other apps" permission';
             }
+            if (($state['lockdown'] ?? false) === true) {
+                if (($state['lockdown_mode'] ?? null) === 'partial' && ($state['accessibility_helper'] ?? true) === false) {
+                    $reasons[] = 'lockdown can be escaped: accessibility helper is off';
+                } elseif (in_array($state['lockdown_mode'] ?? null, ['owner', 'mdm'], true)
+                    && ($state['lock_task'] ?? true) === false) {
+                    $reasons[] = 'lockdown on but not locked';
+                }
+            }
             if (!empty($state['page_error'])) {
                 $reasons[] = 'page error';
             }

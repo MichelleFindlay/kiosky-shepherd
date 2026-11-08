@@ -81,6 +81,11 @@ final class Policy
             'type' => 'bool', 'default' => false, 'group' => 'Lockdown',
             'label' => 'Back button can close Kiosky', 'help' => 'When off, Back on the first page does nothing.',
         ],
+        'lockdown' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Lockdown',
+            'label' => 'Lock the tablet to Kiosky',
+            'help' => 'Blocks the notification shade, Home, Recents and Settings so Kiosky can\'t be left. Complete when Kiosky is the device owner or allowed by an MDM; otherwise partial, and stronger with the accessibility helper turned on (each device page shows lockdown_mode). Needs Kiosky 1.4.0 or later.',
+        ],
 
         // --- Updates ------------------------------------------------------------
         'updates.source' => [
