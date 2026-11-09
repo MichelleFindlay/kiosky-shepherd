@@ -164,8 +164,9 @@ jobs:
       - name: Event webhooks arrived, signed
         run: |
           cat "$RUNNER_TEMP/hooks.log"
-          grep -q '"event":"test"' "$RUNNER_TEMP/hooks.log"
-          grep -q '"event":"device.enrolled"' "$RUNNER_TEMP/hooks.log"
+          # MySQL re-formats JSON columns ("event": "test"); MariaDB keeps them as sent
+          grep -Eq '"event": ?"test"' "$RUNNER_TEMP/hooks.log"
+          grep -Eq '"event": ?"device.enrolled"' "$RUNNER_TEMP/hooks.log"
           grep -q 'X-Shepherd-Signature: sha256=' "$RUNNER_TEMP/hooks.log"
 
       - name: Cron runs a due schedule
