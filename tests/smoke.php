@@ -264,7 +264,9 @@ check(($s1['wifi.networks'][0]['password'] ?? null) === ['set' => true] && ($s1[
     && ($s1['mqtt.password'] ?? null) === ['set' => true], 'Wi-Fi and MQTT passwords are hidden from the console', $s1);
 expect($admin, 200, 'PATCH', "$A/profiles/1", ['settings' => ['wifi.networks' => "Office | (saved) | wpa3 | hidden\nGuest | | open\nNew | new-pass-1"]]);
 $pol = expect($device, 200, 'POST', "$D/checkin", [])['policy'];
-check(($pol['wifi']['networks'][0] ?? null) === ['ssid' => 'Office', 'password' => 'office-pass', 'security' => 'wpa3', 'hidden' => true]
+$office = (array) ($pol['wifi']['networks'][0] ?? []);
+ksort($office); // MySQL 8 stores JSON objects with their keys reordered
+check($office === ['hidden' => true, 'password' => 'office-pass', 'security' => 'wpa3', 'ssid' => 'Office']
     && count($pol['wifi']['networks']) === 3 && ($pol['session']['clear_on_idle'] ?? null) === true
     && ($pol['mqtt']['topic'] ?? null) === 'wall/hall' && ($pol['mqtt']['password'] ?? null) === 'mq pass'
     && ($pol['mqtt']['port'] ?? null) === 1883 && ($pol['updates']['rollout_hours'] ?? null) === 48
