@@ -113,6 +113,47 @@ and keep its name, overrides and history.
 Store `server`, `device_token`, `device_id`, `name` and `policy`, apply the
 policy immediately (§5), then start the check-in loop (§4).
 
+### 3.3 QR provisioning (Kiosky 1.7.0+)
+
+A factory-reset tablet can be set up with no computer. On the first setup screen,
+tap six times in the same spot; Android opens a QR scanner. The console's
+**Provisioning QR** encodes Android's provisioning extras:
+
+```json
+{
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": "uk.lp0.ha/kiosky.AdminReceiver",
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": "https://kiosks.example.com/api/v1/provisioning/ABCD2EFGH3JK/kiosky.apk",
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_CHECKSUM": "<base64url SHA-256 of the APK>",
+  "android.app.extra.PROVISIONING_LEAVE_ALL_SYSTEM_APPS_ENABLED": true,
+  "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": true,
+  "android.app.extra.PROVISIONING_WIFI_SSID": "Office",
+  "android.app.extra.PROVISIONING_WIFI_SECURITY_TYPE": "WPA",
+  "android.app.extra.PROVISIONING_WIFI_PASSWORD": "…",
+  "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": { "server": "https://kiosks.example.com", "token": "ABCD2EFGH3JK" }
+}
+```
+
+- The enrollment code list includes this object as `provisioning` (without Wi-Fi,
+  which the console adds in the browser so the password never reaches the server),
+  or `null` when there's nothing to provision with.
+- `GET /api/v1/provisioning/{code}/kiosky.apk` returns the newest stable release.
+  There's no device yet, so the enrollment code (active, not used up or expired)
+  is the credential; requests are rate-limited per IP. `provisioning.apk_url` in
+  `config.php` points the QR at another download instead.
+- When this server serves the APK, the QR carries `PACKAGE_CHECKSUM`: the
+  release's SHA-256, base64url without padding. It matches whichever signature a
+  tablet checks, which matters because Kiosky 1.7.0+ is signed with key rotation
+  (the original key for Android 5.1–8.1, the release key for 9+). With
+  `provisioning.apk_url`, the QR carries `SIGNATURE_CHECKSUM` instead: the release
+  key's certificate (`5D43Qjavxg_OZaPbJfD5a9QWhnhi6drJw8uro0Zl9I8`), or
+  `provisioning.signature_checksum` for builds signed with another key. That only
+  suits Android 9+ tablets.
+- Android installs Kiosky as device owner. On Android 12+ it asks Kiosky's
+  `GET_PROVISIONING_MODE` activity (answer: fully managed) and
+  `ADMIN_POLICY_COMPLIANCE` activity. Kiosky stores the admin extras, turns on
+  start on boot, then enrolls with `server` and `token` by itself as soon as the
+  network is up (retrying every minute), without the usual confirmation.
+
 ## 4. Check-in
 
 ### 4.1 `POST /api/v1/device/checkin`
@@ -168,12 +209,42 @@ straight after finishing any command.
   | `device_owner` | Kiosky is the device owner |
   | `accessibility_helper` | Kiosky's accessibility helper is running (partial lockdown) |
   | `default_home` | Kiosky is the default Home app |
+
+  Kiosky 1.7.0+ also sends these. The overview flags `battery_temperature` at or
+  above `alerts.battery_hot` (45 °C by default) and a failing `battery_health`.
+
+  | Key | Meaning |
+  | --- | --- |
+  | `battery_temperature` | Battery temperature in °C (one decimal) |
+  | `battery_health` | `good`, `overheat`, `dead`, `over_voltage`, `failure`, `cold` or `unknown` |
+  | `battery_full_hours` | Whole hours the battery has sat at 100% on charge while Kiosky ran |
+  | `battery_protect` | Charging limit (`battery.protect`): `on`, `off`, `no_permission` or `unsupported` |
+  | `storage_free_mb`, `storage_total_mb` | App storage volume |
+  | `memory_free_mb`, `memory_total_mb`, `memory_low` | System memory (`ActivityManager.MemoryInfo`) |
+  | `app_memory_mb` | Kiosky's own Java heap in use |
+  | `screen_schedule` | `off` or `on`, when a screen schedule is set |
+  | `screen_state` | `normal`, `dim` or `off` |
+  | `camera_permission`, `microphone_permission` | Android's camera / microphone permission is granted |
+  | `offline_screen` | The "Reconnecting…" screen is covering the page |
+  | `screensaver` | The screensaver is showing |
+  | `reboot_supported` | `reboot` and `reboot_at` reboot the tablet (device owner, Android 7+) |
+  | `volume_percent` | Media volume, 0–100 |
+  | `playlist_index` | With a playlist: -1 on the start page, otherwise the playlist page shown |
 - `events`: anything that happened since the last successful check-in, oldest
   first, at most 50. Keep them queued locally until a check-in succeeds.
   Suggested types: `page_error`, `page_loaded`, `policy_applied`,
   `update_started`, `update_failed`, `app_started`, `crash`. Kiosky also sends
   `navigation_blocked`, `pin_failed`, and `lockdown_on` / `lockdown_off` (with
-  `mode` and, when the policy changed it, `source: "policy"`).
+  `mode` and, when the policy changed it, `source: "policy"`). Kiosky 1.7.0+ adds
+  `renderer_crashed` (`crashed`, `url`, `looping`), `watchdog_reload`,
+  `watchdog_rebuild`, `idle_home`, `screen_schedule` (`state`), `media_denied`
+  (`origin`, `reason`), `js_dialog` (`type`, `message`), `battery_hot` /
+  `battery_cool` (`temperature`, `level`, `charging`) and `battery_protect`
+  (`state`), `crash` (`thread`, `message`, `stack`, `app_version`, `at_ms`: sent at
+  the next start), `certificate_untrusted` (`url`, `host`, `fingerprint`, `error`,
+  `subresource`), `screensaver` (`state`), `rebooting` / `restarting` (`reason`) and
+  `reboot_failed`, and sends `page_error` for main-frame HTTP errors too, with the
+  HTTP status as `code`.
 
 **200 OK**
 
@@ -254,12 +325,30 @@ success.
     "pause_on_touch_seconds": 120
   },
 
+  "idle_home_minutes": 0,
+  "watchdog_minutes": 2,
+  "media": { "camera": true, "microphone": true },
+
   "screen": {
     "off_at": "22:00",
     "on_at": "07:00",
     "wake_on_touch": true,
-    "wake_minutes": 5
+    "wake_on_motion": false,
+    "wake_minutes": 5,
+    "dim_at": "",
+    "dim_until": "",
+    "dim_brightness": 15,
+    "idle_dim_minutes": 0
   },
+
+  "battery": { "protect": false },
+
+  "file_uploads": true,
+  "reboot_at": "",
+  "http_auth": { "host": "", "username": "", "password": "" },
+  "trusted_certificates": [],
+  "screensaver": { "minutes": 0, "url": "" },
+  "audio": { "volume": -1, "quiet_at": "", "quiet_until": "", "quiet_volume": 0 },
 
   "toolbar": {
     "mode": "hidden",
@@ -298,16 +387,29 @@ older apps. If a key is missing, use the default shown above.
 | `start_on_boot` | Replaces the `start_on_boot` preference read by `BootReceiver`. Hide the toolbar toggle while managed. If `true` and `canDrawOverlays()` is false on Android 10+, report `start_on_boot_permission: false`. Only open the overlay-permission screen when the PIN unlocks the toolbar, never on its own. |
 | `keep_screen_on` | Add or clear `FLAG_KEEP_SCREEN_ON` and `setKeepScreenOn()`. |
 | `orientation` | `setRequestedOrientation()`: `auto` → `SCREEN_ORIENTATION_UNSPECIFIED` (-1), `portrait` → 1, `landscape` → 0, `reverse_portrait` → 9, `reverse_landscape` → 8. |
-| `allow_exit` | If `false`, `onBackPressed()` on the first page does nothing instead of calling `super.onBackPressed()`. |
+| `allow_exit` | If `false`, `onBackPressed()` on the first page does nothing instead of calling `super.onBackPressed()`. Kiosky 1.7.0+ also ignores Back on the first page while `lockdown` is on, since closing would end screen pinning. |
 | `lockdown` | Keep the tablet locked to Kiosky (§5.4). Replaces the local Lockdown toggle while managed: the app turns lockdown on or off whenever this changes. The PIN-unlocked toolbar may show the lockdown checklist, but can't turn it off. Apps before 1.4.0 ignore it. |
 | `toolbar.mode` | `hidden`: an edge swipe still reveals the system bars (Android always allows that) but the Kiosky toolbar stays hidden. `limited`: show only **Reload** and **Help**. `full`: also the address box and **Go**. Addresses typed in `full` mode are **temporary**: open them, but never save them; restart, `go_home` or a policy change returns to `url`. The **Update** and **Start on boot** buttons and the unmanaged **Enroll** button are never shown while managed. |
 | `toolbar.timeout_seconds` | Replaces `BAR_TIMEOUT_MS` (currently 15 s). |
 | `toolbar.pin` | `null`: no local unlock. Otherwise a technician can unlock the full toolbar (§5.3). |
 | `updates.*` | See §6. |
 | `checkin_seconds` | Interval of the check-in loop. |
-| `playlist.urls`, `playlist.seconds`, `playlist.pause_on_touch_seconds` | Page playlist. When `urls` isn't empty, show `url` and then each playlist page in turn, `seconds` each, looping. A touch pauses the rotation for `pause_on_touch_seconds` (0: never pause), then it carries on from the current page. Playlist hosts are always allowed, like the start page's. `go_home` and policy changes restart at `url`. Apps that don't support it ignore these keys. |
-| `screen.off_at`, `screen.on_at` | Screen schedule, in the tablet's local time (`HH:MM`, 24-hour). `off_at` empty: no schedule. Between `off_at` and `on_at` (wrapping past midnight when `on_at` is earlier) turn the screen off: clear `FLAG_KEEP_SCREEN_ON` and set the window's `screenBrightness` to 0 and show a black overlay, or call `DevicePolicyManager.lockNow()` when Kiosky is the device owner. At `on_at` restore brightness (and wake the screen with a `FULL_WAKE_LOCK`/`setTurnScreenOn` when it was locked), then reload the page. Report `screen_schedule: "off"` or `"on"` in `status`. Added in server 1.4.0; apps that don't support it ignore these keys. |
-| `screen.wake_on_touch`, `screen.wake_minutes` | While off for the schedule, a touch turns the screen on for `wake_minutes`, then it goes off again. The touch must not reach the page. |
+| `playlist.urls`, `playlist.seconds`, `playlist.pause_on_touch_seconds` | Page playlist. When `urls` isn't empty, show `url` and then each playlist page in turn, `seconds` each, looping. A touch pauses the rotation for `pause_on_touch_seconds` (0: never pause), then it carries on from the current page. Playlist hosts are always allowed, like the start page's. `go_home` and policy changes restart at `url`. Implemented in Kiosky 1.7.0; older apps ignore these keys. |
+| `file_uploads` | Let pages open Android's file picker for `<input type="file">`. Kiosky 1.7.0+. |
+| `reboot_at` | Daily at this local time (`HH:MM`): reboot with `DevicePolicyManager.reboot()` as device owner on Android 7+, otherwise restart Kiosky fresh. Skipped within 30 minutes of starting. Kiosky 1.7.0+. |
+| `http_auth.host`, `http_auth.username`, `http_auth.password` | Answer HTTP basic-auth prompts from `host` (empty: the `url` host) with these. A prompt that comes straight back (wrong details) is cancelled and reported as `page_error` code 401. The console never shows the password again (`{"set": true}`), but devices get it in clear. Kiosky 1.7.0+. |
+| `trusted_certificates` | SHA-256 fingerprints (`AB:12:…`) of certificates to accept despite TLS errors (self-signed, private CA), only on the `url` host, `allowed_hosts` and admin-sent pages. Others are refused and reported as `certificate_untrusted` with the fingerprint. Kiosky 1.7.0+. |
+| `screensaver.minutes`, `screensaver.url` | After this many minutes without a touch (or motion, with `wake_on_motion`), cover the page with a drifting clock, or with the https page `url` (kept to its own site). A touch closes it without reaching the page. Kiosky 1.7.0+. |
+| `audio.volume`, `audio.quiet_at`, `audio.quiet_until`, `audio.quiet_volume` | Media volume in percent (-1: leave it), and a lower volume between the quiet times. Applied when the wanted level changes, so local adjustments hold until then. Kiosky 1.7.0+. |
+| `screen.off_at`, `screen.on_at` | Screen schedule, in the tablet's local time (`HH:MM`, 24-hour). `off_at` empty: no schedule. Between `off_at` and `on_at` (wrapping past midnight when `on_at` is earlier) turn the screen off: clear `FLAG_KEEP_SCREEN_ON` and set the window's `screenBrightness` to 0 and show a black overlay, or call `DevicePolicyManager.lockNow()` when Kiosky is the device owner. At `on_at` restore brightness (and wake the screen with a `FULL_WAKE_LOCK`/`setTurnScreenOn` when it was locked), then reload the page. Report `screen_schedule: "off"` or `"on"` in `status`. Added in server 1.4.0; implemented in Kiosky 1.7.0. Kiosky keeps the screen on (black, brightness 0) while something can wake it; otherwise it lets it switch off and uses an alarm to wake it at `on_at`. |
+| `screen.wake_on_touch`, `screen.wake_minutes` | While off for the schedule, a touch turns the screen on for `wake_minutes`, then it goes off again. The touch must not reach the page. Kiosky also wakes on five quick taps when `wake_on_touch` is off, so a technician can always get in. |
+| `screen.wake_on_motion` | The proximity sensor ("near") or a clear jump on the light sensor counts like a touch for waking and for idle dimming, without touching the page. Kiosky 1.7.0+. |
+| `screen.dim_at`, `screen.dim_until`, `screen.dim_brightness` | Between the two local times, set the window brightness to `dim_brightness` percent. Empty: no dimming. Kiosky 1.7.0+. |
+| `screen.idle_dim_minutes` | Dim to `dim_brightness` after this many minutes without a touch (0: never). The first touch only brightens the screen. Kiosky 1.7.0+. |
+| `idle_home_minutes` | After this many minutes without a touch, load `url` if the page isn't already it (0: never). "Already it" includes where `url` redirected to. Kiosky 1.7.0+. |
+| `watchdog_minutes` | Every 15 s Kiosky runs `evaluateJavascript("1")`. With no answer for this long, reload; if the next check fails too, replace the WebView (0: off). Kiosky 1.7.0+. |
+| `media.camera`, `media.microphone` | Grant a page's `onPermissionRequest` for video/audio capture when on, and only to https origins on the `url` host, matching an `allowed_hosts` entry, or an admin-sent `navigate` page. An empty `allowed_hosts` allows no further hosts here. Kiosky asks Android for CAMERA / RECORD_AUDIO when needed; as device owner it grants them itself. Kiosky 1.7.0+. |
+| `battery.protect` | Turn on the tablet's own charging limit. Experimental: Samsung `Settings.Global protect_battery`, which needs `adb shell pm grant uk.lp0.ha android.permission.WRITE_SECURE_SETTINGS`. Reported as `battery_protect`. Kiosky only turns it off again if it turned it on. Kiosky 1.7.0+. |
 
 ### 5.3 Technician unlock (PIN)
 
@@ -350,6 +452,25 @@ completely depends on the device, reported as `lockdown_mode`:
 Kiosky's own menu (an edge swipe, or five taps in the top-left corner) is the only
 way out. While managed, only the PIN-unlocked toolbar can open the settings screens
 that strengthen a partial lockdown.
+
+### 5.5 Page bridge (Kiosky 1.7.0+)
+
+Kiosky gives pages a `window.kiosky` object, so a dashboard can react to its own
+sensors (for example a Home Assistant motion sensor):
+
+| Method | Who may call it | Effect |
+| --- | --- | --- |
+| `wake()` | Any page | As `wake_screen` |
+| `isScreenOff()` | Any page | `true` while the screen is off |
+| `version()` | Any page | Kiosky's version name |
+| `reload()` | Trusted page | Reloads the page |
+| `setBrightness(percent)` | Trusted page | 1–100 until changed; 0 or less: the tablet's own brightness |
+| `screenOff()` | Trusted page | Black screen until a touch, `wake()`, `wake_screen` or motion |
+| `deviceName()` | Trusted page | The Shepherd device name (`""` otherwise) |
+
+A trusted page is one whose address is on the `url` host or an `allowed_hosts`
+entry, or an admin-sent `navigate` page. Methods return `false` when refused.
+Frames inside a trusted page share the object, so only allow hosts you trust.
 
 ## 6. Updates
 
@@ -394,7 +515,10 @@ it again.
 | `reload` | — | `web.reload()` |
 | `go_home` | — | Load the policy `url` |
 | `navigate` | `url` (https) | Load `url` once. Not saved; `allowed_hosts` is **not** applied to admin-sent URLs. |
-| `restart_app` | — | Report the result first, then restart the activity (`recreate()` or relaunch via `AlarmManager`/`startActivity` + `finish()`). |
+| `restart_app` | — | Report the result first, then restart the activity (`recreate()` or relaunch via `AlarmManager`/`startActivity` + `finish()`). Kiosky 1.7.0+ loads `url` fresh instead of restoring the old page. |
+| `announce` | `text`, `volume` (optional) | Read `text` aloud with Android's text-to-speech, at `volume` percent if given (restored afterwards). Fails if the tablet has no text-to-speech engine. Kiosky 1.7.0+. |
+| `reboot` | — | Report the result, then reboot after a few seconds. Device owner on Android 7+ only; otherwise `failed`. Kiosky 1.7.0+. |
+| `wake_screen` | `minutes` (optional) | Wake the screen for `minutes` (default `screen.wake_minutes`) if it's off for the schedule. Kiosky 1.7.0+. |
 | `clear_cache` | — | `web.clearCache(true)`, then reload |
 | `clear_web_data` | — | `CookieManager.removeAllCookies()`, `WebStorage.getInstance().deleteAllData()`, `clearCache(true)`, `clearHistory()`, then load `url`. Signs the kiosk out of its sites. |
 | `check_update` | — | Run a check now with the current `updates.source` |
@@ -403,6 +527,11 @@ it again.
 | `screenshot` | `max_width`, `quality` | Capture the WebView (`web.draw()` into a `Bitmap`), scale it to at most `max_width`, encode as JPEG at `quality`, and send it in the result |
 | `diagnostics` | `lines` | Collect recent troubleshooting data: the app's log (up to `lines` lines of its own logcat output), WebView console errors, the current policy version, device and app versions, storage and memory. Put it in a text file, gzip it (or zip several files), and send it as `"bundle": "<base64>"` in the result (at most 10 MB decoded). Don't include page content, cookies or the device token. |
 | `live_view` | `seconds`, `interval`, `max_width`, `quality` | Report `done` straight away, then for `seconds` capture a frame as for `screenshot` every `interval` seconds and `POST /api/v1/device/live` it (below). A newer `live_view` replaces a running one; `seconds: 0` stops it. Stop early on 4xx answers. Added in server 1.4.0. |
+
+Kiosky 1.7.0 implements `diagnostics` (a gzipped text file: versions, the status
+report, page console warnings and errors, the last crash and its own log) and
+`live_view`, and captures `screenshot` and live frames from the whole screen,
+including anything over the page (offline screen, help, screensaver).
 
 Unknown command types must be reported as `failed` with message
 `"unsupported command"`.

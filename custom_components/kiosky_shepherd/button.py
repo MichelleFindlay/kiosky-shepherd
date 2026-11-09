@@ -15,11 +15,16 @@ from .entity import KioskyShepherdEntity, add_entities_for_new_devices
 BUTTONS: tuple[ButtonEntityDescription, ...] = (
     ButtonEntityDescription(key="reload", name="Reload page", icon="mdi:refresh"),
     ButtonEntityDescription(key="go_home", name="Back to start page", icon="mdi:home"),
+    ButtonEntityDescription(key="wake_screen", name="Wake screen", icon="mdi:monitor-eye"),
     ButtonEntityDescription(key="identify", name="Identify", device_class=ButtonDeviceClass.IDENTIFY),
     ButtonEntityDescription(key="screenshot", name="Take screenshot", icon="mdi:camera", entity_category=EntityCategory.DIAGNOSTIC),
     ButtonEntityDescription(key="clear_cache", name="Clear cache", icon="mdi:broom", entity_category=EntityCategory.CONFIG),
     ButtonEntityDescription(
         key="restart_app", name="Restart Kiosky", device_class=ButtonDeviceClass.RESTART, entity_category=EntityCategory.CONFIG
+    ),
+    ButtonEntityDescription(
+        key="reboot", name="Reboot tablet", icon="mdi:restart-alert", entity_category=EntityCategory.CONFIG,
+        entity_registry_enabled_default=False,
     ),
 )
 

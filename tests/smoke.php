@@ -153,6 +153,12 @@ $ci = expect($device, 200, 'POST', "$D/checkin", []);
 check($ci['checkin_seconds'] === $w['fast_checkin_seconds'], 'watched device is told to check in faster', $ci['checkin_seconds']);
 
 // ---- Commands ---------------------------------------------------------------------
+expect($admin, 422, 'POST', "$A/devices/$id/commands", ['type' => 'wake_screen', 'params' => ['minutes' => 300]]);
+expect($admin, 422, 'POST', "$A/devices/$id/commands", ['type' => 'announce']);
+expect($admin, 201, 'POST', "$A/devices/$id/commands", ['type' => 'announce', 'params' => ['text' => 'Hello', 'volume' => 50]]);
+expect($admin, 201, 'POST', "$A/devices/$id/commands", ['type' => 'reboot']);
+expect(new Client($base), 403, 'GET', '/api/v1/provisioning/NOTACODE/kiosky.apk');
+expect($admin, 201, 'POST', "$A/devices/$id/commands", ['type' => 'wake_screen']);
 $cmd = expect($admin, 201, 'POST', "$A/devices/$id/commands", ['type' => 'reload']);
 $ci = expect($device, 200, 'POST', "$D/checkin", []);
 check(in_array($cmd['id'], array_column($ci['commands'], 'id'), true), 'command is delivered at check-in');
@@ -219,7 +225,28 @@ check(in_array('url', array_column($hist['items'][0]['changes'], 'key'), true), 
 $baseline = end($hist['items']);
 check($baseline['action'] === 'baseline', 'the migration recorded a baseline', $baseline);
 expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['screen.off_at' => '25:00']]);
-expect($admin, 200, 'PATCH', "$A/profiles/1", ['settings' => ['screen.off_at' => '22:00', 'screen.on_at' => '07:00']]);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['screen.dim_brightness' => 0]]);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['watchdog_minutes' => 61]]);
+expect($admin, 200, 'PATCH', "$A/profiles/1", ['settings' => ['screen.off_at' => '22:00', 'screen.on_at' => '07:00',
+    'screen.dim_at' => '20:00', 'screen.dim_until' => '07:00', 'screen.wake_on_motion' => true, 'idle_home_minutes' => 10,
+    'watchdog_minutes' => 3, 'media.camera' => false, 'battery.protect' => true]]);
+$pol = expect($device, 200, 'POST', "$D/checkin", [])['policy'];
+check(($pol['screen']['dim_at'] ?? null) === '20:00' && ($pol['media']['camera'] ?? null) === false
+    && ($pol['battery']['protect'] ?? null) === true && ($pol['idle_home_minutes'] ?? null) === 10,
+    'Kiosky 1.7.0 keys reach the device nested', $pol);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['trusted_certificates' => ['not-a-fingerprint']]]);
+$fp = str_repeat('ab', 32);
+expect($admin, 200, 'PATCH', "$A/profiles/1", ['settings' => ['trusted_certificates' => [$fp, strtoupper($fp)],
+    'http_auth.username' => 'kiosk', 'http_auth.password' => ' s3cret ', 'reboot_at' => '04:00',
+    'screensaver.minutes' => 10, 'audio.volume' => 40, 'playlist.urls' => ['https://example.com/cams']]]);
+$prof = expect($admin, 200, 'GET', "$A/profiles");
+$p1 = array_values(array_filter($prof, static fn ($p) => (int) $p['id'] === 1))[0] ?? [];
+check(((array) ($p1['settings'] ?? []))['http_auth.password'] === ['set' => true], 'the HTTP sign-in password is hidden from the console', $p1);
+expect($admin, 200, 'PATCH', "$A/profiles/1", ['settings' => ['http_auth.password' => ['set' => true]]]); // round-trip keeps it
+$pol = expect($device, 200, 'POST', "$D/checkin", [])['policy'];
+check(($pol['http_auth']['password'] ?? null) === ' s3cret ' && count($pol['trusted_certificates'] ?? []) === 1
+    && ($pol['trusted_certificates'][0] ?? '') === implode(':', str_split(strtoupper($fp), 2)),
+    'the device gets the password and one normalised fingerprint', $pol);
 $restored = expect($admin, 200, 'POST', "$A/profiles/1/versions/{$baseline['id']}/restore");
 check((array) $restored['settings'] === [], 'restore puts the profile back as it was', $restored['settings']);
 $hist = expect($admin, 200, 'GET', "$A/profiles/1/versions");
@@ -429,6 +456,10 @@ expect($device, 200, 'POST', "$D/checkin", ['status' => ['battery_level' => 5, '
 $ov = expect($second, 200, 'GET', "$A/overview");
 $why = implode(' | ', array_merge(...array_map(static fn ($a) => $a['reasons'], $ov['attention'])));
 check(str_contains($why, 'battery at 5%'), 'low battery shows on the overview', $ov['attention']);
+expect($device, 200, 'POST', "$D/checkin", ['status' => ['battery_level' => 100, 'charging' => true, 'battery_temperature' => 51.5, 'battery_health' => 'overheat']]);
+$ov = expect($second, 200, 'GET', "$A/overview");
+$why = implode(' | ', array_merge(...array_map(static fn ($a) => $a['reasons'], $ov['attention'])));
+check(str_contains($why, 'battery at 52 °C') && str_contains($why, 'battery reports overheat'), 'a hot, failing battery shows on the overview', $ov['attention']);
 
 // ---- Enrollment codes with tags and notes, and the device.enrolled event ---------------
 expect($second, 200, 'PATCH', "$A/system/settings", ['events.webhooks' => [['url' => 'http://127.0.0.1:8099/hook', 'events' => [], 'secret' => 'ci-secret']]]);

@@ -42,7 +42,10 @@ locked down.
 
 The Kiosky app needs to implement the client side, which is specified in
 [docs/PROTOCOL.md](docs/PROTOCOL.md). Kiosky 1.1.0 and later can enroll; the
-**Lock the tablet to Kiosky** setting needs Kiosky 1.4.0 or later.
+**Lock the tablet to Kiosky** setting needs Kiosky 1.4.0 or later. The screen
+schedule and dimming, going back to the start page when idle, the frozen-page
+watchdog, camera and microphone access, battery care and the **Wake the screen**
+command need Kiosky 1.7.0 or later.
 
 ## Requirements
 
@@ -429,8 +432,22 @@ user limited to some devices only sees those.
 
 The **Page playlist** policy settings rotate a tablet between several pages (say a
 dashboard, cameras and a calendar), each for a set time, pausing after a touch. They
-need a Kiosky version that supports them ([docs/PROTOCOL.md](docs/PROTOCOL.md) §5.2); others ignore
+need Kiosky 1.7.0 or later ([docs/PROTOCOL.md](docs/PROTOCOL.md) §5.2); older versions ignore
 them.
+
+## Setting up tablets with a QR code (no computer)
+
+Each enrollment code has a **Provisioning QR**. Factory-reset a tablet, tap six
+times in the same spot on its first setup screen to open the QR scanner, and scan
+it. The tablet joins the Wi-Fi you typed (the password stays in your browser),
+downloads Kiosky from this server, makes it the **device owner** (so full lockdown,
+silent updates and scheduled reboots work) and enrolls with the code by itself.
+
+It needs Kiosky 1.7.0 or later uploaded under **Releases** as a stable release, or
+`provisioning.apk_url` in `config.php` pointing at a Kiosky APK (Android 9+
+tablets only; builds signed with your own key also need
+`provisioning.signature_checksum`, see [docs/PROTOCOL.md](docs/PROTOCOL.md) §3.3). The code must still be active when the
+tablet downloads Kiosky and enrolls.
 
 ## Scheduled commands
 
@@ -564,15 +581,18 @@ Overview flags devices below 90%. Summaries are kept for a year.
 ## Live view
 
 **Live view** on a device page streams the tablet's screen every 2 seconds for as
-long as the page is open. It needs a Kiosky version that supports the `live_view`
-command ([docs/PROTOCOL.md](docs/PROTOCOL.md) §7); older versions report "unsupported
-command", and **Take screenshot** still works. Only the latest frame is kept.
+long as the page is open. It needs Kiosky 1.7.0 or later; older versions report
+"unsupported command", and **Take screenshot** still works. Only the latest frame is
+kept. **Collect diagnostics** (also 1.7.0+) fetches a log bundle with versions, the
+status report, page console errors and the last crash.
 
 ## Screen schedule
 
 The **Screen schedule** policy settings turn the screen off at night (e.g. 22:00
-to 07:00, in the tablet's own time), with an optional touch-to-wake. They need a
-Kiosky version that supports them (§5.2 of the protocol); others ignore them.
+to 07:00, in the tablet's own time), with touch or motion to wake, and can dim it
+for part of the day or when idle. **Screensaver and sound** add a clock screensaver
+(or a page of your own), a volume and quiet hours. They need Kiosky 1.7.0 or later
+(§5.2 of the protocol); older versions ignore them.
 
 ## Home Assistant
 
@@ -587,10 +607,12 @@ those.
 
 Each tablet becomes a device with:
 
-- **Sensors**: Online, Battery, Charging, Screen on, Current page, Profile, Kiosky
-  version, Last seen, Online last 7 days, Policy applied, Wi-Fi signal (off by default)
-- **Buttons**: Reload page, Back to start page, Identify, Take screenshot, Clear
-  cache, Restart Kiosky
+- **Sensors**: Online, Battery, Charging, Screen on, Screen (normal, dim or off),
+  Current page, Profile, Kiosky version, Last seen, Online last 7 days, Policy
+  applied, Battery temperature and Wi-Fi signal (both off by default)
+- **Buttons**: Reload page, Back to start page, Wake screen, Identify, Take
+  screenshot, Clear cache, Restart Kiosky, Reboot tablet (off by default; device
+  owner only)
 - **Services**: `kiosky_shepherd.show_message`, `kiosky_shepherd.open_page` and
   `kiosky_shepherd.send_command`, targeting tablets by device
 
@@ -612,6 +634,16 @@ automation:
           message: Someone is at the front door
           seconds: 60
 ```
+
+### Battery care blueprint
+
+Tablets kept at 100% on charge wear out and can swell. If the charger is on a
+smart plug, import
+[blueprints/automation/kiosky_shepherd/battery_charge_plug.yaml](blueprints/automation/kiosky_shepherd/battery_charge_plug.yaml)
+(**Settings → Automations → Blueprints → Import**, with the file's GitHub URL). It
+keeps the battery between two levels (30–80% by default) and cuts charging when
+the battery runs hot. It works on any tablet, unlike Kiosky's own charging limit,
+which only works on some Samsung models.
 
 ## Single sign-on
 

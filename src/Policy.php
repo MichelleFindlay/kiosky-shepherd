@@ -48,6 +48,54 @@ final class Policy
             'type' => 'bool', 'default' => true, 'group' => 'Page',
             'label' => 'Allow third-party cookies', 'help' => 'Some single sign-on flows need this.',
         ],
+        'idle_home_minutes' => [
+            'type' => 'int', 'min' => 0, 'max' => 1440, 'default' => 0, 'group' => 'Page',
+            'label' => 'Back to the start page after (minutes untouched)',
+            'help' => 'If someone taps into another page and walks away, the tablet returns to the start page. 0 turns this off. Needs Kiosky 1.7.0 or later.',
+        ],
+        'watchdog_minutes' => [
+            'type' => 'int', 'min' => 0, 'max' => 60, 'default' => 2, 'group' => 'Page',
+            'label' => 'Restart a frozen page after (minutes)',
+            'help' => 'Kiosky checks the page still responds. If it doesn\'t for this long, it reloads it, then rebuilds it if that doesn\'t help. 0 turns the check off. Needs Kiosky 1.7.0 or later.',
+        ],
+
+        'file_uploads' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Page',
+            'label' => 'Pages may upload files',
+            'help' => 'Lets "choose file" buttons open Android\'s file picker. The picker is another app, so turn this off on locked-down public tablets that don\'t need it. Needs Kiosky 1.7.0 or later.',
+        ],
+
+        // --- Sign-in and certificates (Kiosky 1.7.0+) ------------------------------
+        'http_auth.host' => [
+            'type' => 'string', 'max' => 253, 'default' => '', 'group' => 'Sign-in and certificates',
+            'label' => 'HTTP sign-in: site',
+            'help' => 'For pages behind a browser username/password prompt (HTTP basic auth). Empty: the start page\'s site.',
+        ],
+        'http_auth.username' => [
+            'type' => 'string', 'max' => 200, 'default' => '', 'group' => 'Sign-in and certificates',
+            'label' => 'HTTP sign-in: username', 'help' => '',
+        ],
+        'http_auth.password' => [
+            'type' => 'secret', 'max' => 200, 'default' => '', 'group' => 'Sign-in and certificates',
+            'label' => 'HTTP sign-in: password',
+            'help' => 'Sent to the tablets with their policy, so use an account that can only view the kiosk page. Never shown again here once saved.',
+        ],
+        'trusted_certificates' => [
+            'type' => 'fingerprints', 'default' => [], 'group' => 'Sign-in and certificates',
+            'label' => 'Trusted certificates (SHA-256)',
+            'help' => 'For servers with a self-signed or private certificate, such as Home Assistant on your network. One SHA-256 fingerprint per line (AB:12:… or plain hex). Trusted only on the start page\'s site and Allowed sites. A tablet that meets an untrusted certificate logs certificate_untrusted with its fingerprint, ready to copy here.',
+        ],
+
+        // --- Camera and microphone (Kiosky 1.7.0+) ---------------------------------
+        'media.camera' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Camera and microphone',
+            'label' => 'Pages may use the camera',
+            'help' => 'For video doorbells and intercoms. Only the start page\'s site and sites listed by name under Allowed sites get it (an empty list allows no others). Android asks once on the tablet unless Kiosky is the device owner.',
+        ],
+        'media.microphone' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Camera and microphone',
+            'label' => 'Pages may use the microphone', 'help' => 'For two-way audio. Same sites as the camera.',
+        ],
 
         // --- Device -------------------------------------------------------------
         'start_on_boot' => [
@@ -62,11 +110,41 @@ final class Policy
             'type' => 'enum', 'values' => ['auto', 'portrait', 'landscape', 'reverse_portrait', 'reverse_landscape'],
             'default' => 'auto', 'group' => 'Device', 'label' => 'Screen orientation', 'help' => '',
         ],
+        'reboot_at' => [
+            'type' => 'time', 'default' => '', 'group' => 'Device', 'label' => 'Restart every day at',
+            'help' => 'Tablet\'s local time, e.g. 04:00. A full reboot when Kiosky is the device owner (Android 7+), otherwise a fresh restart of Kiosky. Clears slow memory leaks. Empty: never. Needs Kiosky 1.7.0 or later.',
+        ],
+
+        // --- Screensaver and sound (Kiosky 1.7.0+) ---------------------------------
+        'screensaver.minutes' => [
+            'type' => 'int', 'min' => 0, 'max' => 1440, 'default' => 0, 'group' => 'Screensaver and sound',
+            'label' => 'Screensaver after (minutes untouched)',
+            'help' => 'A drifting clock and date over the page; a touch closes it without pressing anything. 0 turns it off.',
+        ],
+        'screensaver.url' => [
+            'type' => 'url', 'default' => '', 'group' => 'Screensaver and sound', 'label' => 'Screensaver page',
+            'help' => 'An https:// page to show instead of the clock, such as a photo frame. It can\'t navigate to other sites.',
+        ],
+        'audio.volume' => [
+            'type' => 'int', 'min' => -1, 'max' => 100, 'default' => -1, 'group' => 'Screensaver and sound',
+            'label' => 'Volume (%)', 'help' => '-1 leaves the tablet\'s volume as it is. Applied when it changes, so someone can still adjust it until then.',
+        ],
+        'audio.quiet_at' => [
+            'type' => 'time', 'default' => '', 'group' => 'Screensaver and sound', 'label' => 'Quiet hours from',
+            'help' => 'e.g. 22:00. Leave empty for no quiet hours.',
+        ],
+        'audio.quiet_until' => [
+            'type' => 'time', 'default' => '', 'group' => 'Screensaver and sound', 'label' => 'Quiet hours until', 'help' => 'e.g. 07:00.',
+        ],
+        'audio.quiet_volume' => [
+            'type' => 'int', 'min' => 0, 'max' => 100, 'default' => 0, 'group' => 'Screensaver and sound',
+            'label' => 'Volume during quiet hours (%)', 'help' => '0 mutes it.',
+        ],
 
         // --- Page playlist (needs Kiosky support, see docs/PROTOCOL.md §5.2) -------
         'playlist.urls' => [
             'type' => 'urls', 'default' => [], 'group' => 'Page playlist', 'label' => 'Pages to rotate through',
-            'help' => 'One https:// address per line, shown in turn after the start page. Empty: just the start page. Their hosts are always allowed. Needs a Kiosky version that supports playlists.',
+            'help' => 'One https:// address per line, shown in turn after the start page. Empty: just the start page. Their hosts are always allowed. Needs Kiosky 1.7.0 or later.',
         ],
         'playlist.seconds' => [
             'type' => 'int', 'min' => 10, 'max' => 86400, 'default' => 60, 'group' => 'Page playlist',
@@ -80,7 +158,7 @@ final class Policy
         // --- Screen schedule (needs Kiosky support, see docs/PROTOCOL.md §5.2) -----
         'screen.off_at' => [
             'type' => 'time', 'default' => '', 'group' => 'Screen schedule', 'label' => 'Turn the screen off at',
-            'help' => 'Tablet\'s local time, e.g. 22:00. Leave empty to never turn it off. Needs a Kiosky version that supports the screen schedule.',
+            'help' => 'Tablet\'s local time, e.g. 22:00. Leave empty to never turn it off. Needs Kiosky 1.7.0 or later.',
         ],
         'screen.on_at' => [
             'type' => 'time', 'default' => '', 'group' => 'Screen schedule', 'label' => 'Turn the screen back on at',
@@ -88,11 +166,38 @@ final class Policy
         ],
         'screen.wake_on_touch' => [
             'type' => 'bool', 'default' => true, 'group' => 'Screen schedule', 'label' => 'A touch wakes the screen',
-            'help' => 'While the screen is off for the schedule, touching it turns it on for a few minutes.',
+            'help' => 'While the screen is off for the schedule, touching it turns it on for a few minutes. The touch doesn\'t reach the page. With no way to wake it, the screen switches off fully; five quick taps still wake it.',
+        ],
+        'screen.wake_on_motion' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Screen schedule', 'label' => 'Someone close by wakes the screen',
+            'help' => 'Uses the tablet\'s proximity or light sensor (a hand near the top edge, a room light switched on), during the off hours and after idle dimming. Not every tablet has one.',
         ],
         'screen.wake_minutes' => [
             'type' => 'int', 'min' => 1, 'max' => 120, 'default' => 5, 'group' => 'Screen schedule',
             'label' => 'Stay on after a touch (minutes)', 'help' => '',
+        ],
+        'screen.dim_at' => [
+            'type' => 'time', 'default' => '', 'group' => 'Screen schedule', 'label' => 'Dim the screen from',
+            'help' => 'e.g. 20:00. Leave empty for no dimming. Needs Kiosky 1.7.0 or later.',
+        ],
+        'screen.dim_until' => [
+            'type' => 'time', 'default' => '', 'group' => 'Screen schedule', 'label' => 'Dim the screen until',
+            'help' => 'e.g. 07:00. May be earlier than the start (overnight).',
+        ],
+        'screen.idle_dim_minutes' => [
+            'type' => 'int', 'min' => 0, 'max' => 1440, 'default' => 0, 'group' => 'Screen schedule',
+            'label' => 'Also dim after (minutes untouched)', 'help' => 'The first touch brightens it again without pressing anything. 0 turns this off.',
+        ],
+        'screen.dim_brightness' => [
+            'type' => 'int', 'min' => 1, 'max' => 100, 'default' => 15, 'group' => 'Screen schedule',
+            'label' => 'Dimmed brightness (%)', 'help' => '',
+        ],
+
+        // --- Battery (Kiosky 1.7.0+) --------------------------------------------
+        'battery.protect' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Battery',
+            'label' => 'Limit charging to protect the battery',
+            'help' => 'Tablets left on charge all the time wear out and can swell. Experimental: works on Samsung tablets with "Protect battery" (charging stops at about 85%), and only after running adb shell pm grant uk.lp0.ha android.permission.WRITE_SECURE_SETTINGS once. The device page shows battery_protect: on, no_permission or unsupported.',
         ],
 
         // --- Lockdown -----------------------------------------------------------
@@ -111,7 +216,7 @@ final class Policy
         ],
         'allow_exit' => [
             'type' => 'bool', 'default' => false, 'group' => 'Lockdown',
-            'label' => 'Back button can close Kiosky', 'help' => 'When off, Back on the first page does nothing.',
+            'label' => 'Back button can close Kiosky', 'help' => 'When off, Back on the first page does nothing. Kiosky 1.7.0+ never closes on Back while the tablet is locked to Kiosky.',
         ],
         'lockdown' => [
             'type' => 'bool', 'default' => false, 'group' => 'Lockdown',
@@ -179,8 +284,8 @@ final class Policy
                 $out[$key] = null;
                 continue;
             }
-            if ($def['type'] === 'pin' && is_array($value) && ($value['set'] ?? null) === true) {
-                continue; // the redacted placeholder from a GET: leave the stored PIN alone
+            if (in_array($def['type'], ['pin', 'secret'], true) && is_array($value) && ($value['set'] ?? null) === true) {
+                continue; // the redacted placeholder from a GET: leave the stored value alone
             }
             $err = null;
             $norm = self::normalise($def, $value, $err);
@@ -235,6 +340,40 @@ final class Policy
                     return null;
                 }
                 return $v;
+
+            case 'secret':
+                if (!is_string($v)) {
+                    $err = 'Must be text.';
+                    return null;
+                }
+                if (strlen($v) > $def['max']) {
+                    $err = "Use at most {$def['max']} characters.";
+                    return null;
+                }
+                if (preg_match('/[\x00-\x1F\x7F]/', $v)) {
+                    $err = 'Control characters are not allowed.';
+                    return null;
+                }
+                return $v; // not trimmed: spaces can be part of a password
+
+            case 'fingerprints':
+                if (is_string($v)) {
+                    $v = preg_split('/[\r\n,]+/', $v, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+                }
+                if (!is_array($v) || !array_is_list($v) || count($v) > 50) {
+                    $err = 'Use up to 50 SHA-256 fingerprints, one per line.';
+                    return null;
+                }
+                $fps = [];
+                foreach ($v as $f) {
+                    $hex = strtolower((string) preg_replace('/[^0-9a-fA-F]/', '', is_string($f) ? $f : ''));
+                    if (strlen($hex) !== 64) {
+                        $err = 'Not a SHA-256 fingerprint: ' . Util::clip(is_string($f) ? $f : '', 60) . '. It has 64 hex digits, e.g. AB:12:….';
+                        return null;
+                    }
+                    $fps[implode(':', str_split(strtoupper($hex), 2))] = true;
+                }
+                return array_keys($fps);
 
             case 'time':
                 if (!is_string($v) || !preg_match('/^(([01]\d|2[0-3]):[0-5]\d)?$/', trim($v))) {
@@ -491,11 +630,13 @@ final class Policy
         }
     }
 
-    /** Hides PIN hashes in admin output: they are replaced with {"set": true}. */
+    /** Hides PIN hashes and secrets in admin output: they are replaced with {"set": true}. */
     public static function redact(array $flat): array
     {
         foreach (self::SCHEMA as $key => $def) {
             if ($def['type'] === 'pin' && isset($flat[$key]) && is_array($flat[$key])) {
+                $flat[$key] = ['set' => true];
+            } elseif ($def['type'] === 'secret' && isset($flat[$key]) && is_string($flat[$key]) && $flat[$key] !== '') {
                 $flat[$key] = ['set' => true];
             }
         }

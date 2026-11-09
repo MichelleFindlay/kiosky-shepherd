@@ -47,6 +47,8 @@ final class EnrollmentApi
             'server' => $server,
             // Scanned (QR) or opened as a link on the tablet; see docs/PROTOCOL.md
             'enroll_uri' => 'kiosky://enroll?server=' . rawurlencode($server) . '&token=' . $t['code'],
+            // Android setup-wizard QR (Kiosky 1.7.0+); the console adds Wi-Fi in the browser
+            'provisioning' => $state === 'active' ? \Shepherd\Api\ProvisioningApi::payload($t['code']) : null,
             'created_by' => $t['created_by_name'],
             'created_at' => Util::iso($t['created_at']),
         ];

@@ -24,6 +24,16 @@ final class Commands
             'text' => ['type' => 'string', 'required' => true, 'max' => 500],
             'seconds' => ['type' => 'int', 'min' => 1, 'max' => 3600, 'default' => 30],
         ]],
+        'wake_screen' => ['label' => 'Wake the screen', 'params' => [
+            // Empty: the policy's screen.wake_minutes
+            'minutes' => ['type' => 'int', 'min' => 1, 'max' => 240],
+        ]],
+        'announce' => ['label' => 'Announce (read a message aloud)', 'params' => [
+            'text' => ['type' => 'string', 'required' => true, 'max' => 500],
+            // Empty: the tablet's current volume
+            'volume' => ['type' => 'int', 'min' => 0, 'max' => 100],
+        ]],
+        'reboot' => ['label' => 'Reboot the tablet (device owner only)', 'params' => []],
         'identify' => ['label' => 'Identify (show name on screen)', 'params' => [
             'seconds' => ['type' => 'int', 'min' => 1, 'max' => 300, 'default' => 15],
         ]],

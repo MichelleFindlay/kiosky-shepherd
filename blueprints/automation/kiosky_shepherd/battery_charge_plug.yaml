@@ -1,0 +1,122 @@
+blueprint:
+  name: Kiosky tablet battery care with a smart plug
+  description: >-
+    Tablets left on charge all the time wear their batteries out and can swell.
+    This switches the tablet's charger (a smart plug) off when the battery is
+    full enough and back on when it runs low, keeping it between the two levels.
+    It also cuts charging if the battery gets hot. Uses the Battery and Battery
+    temperature sensors from the Kiosky Shepherd integration (the temperature one
+    is disabled by default; enable it on the device page). The tablet reports its
+    battery at each check-in, so set "Check in every" to a minute or two.
+  domain: automation
+  source_url: https://github.com/MichelleFindlay/kiosky-shepherd/blob/main/blueprints/automation/kiosky_shepherd/battery_charge_plug.yaml
+  input:
+    battery:
+      name: Tablet battery
+      selector:
+        entity:
+          filter:
+            - integration: kiosky_shepherd
+              domain: sensor
+              device_class: battery
+    temperature:
+      name: Tablet battery temperature (optional)
+      default: ""
+      selector:
+        entity:
+          filter:
+            - integration: kiosky_shepherd
+              domain: sensor
+              device_class: temperature
+    plug:
+      name: Smart plug the charger is on
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    low:
+      name: Start charging at (%)
+      default: 30
+      selector:
+        number:
+          min: 10
+          max: 60
+          unit_of_measurement: "%"
+    high:
+      name: Stop charging at (%)
+      default: 80
+      selector:
+        number:
+          min: 50
+          max: 100
+          unit_of_measurement: "%"
+    hot:
+      name: Stop charging above (°C)
+      default: 40
+      selector:
+        number:
+          min: 30
+          max: 55
+          unit_of_measurement: "°C"
+
+mode: restart
+
+variables:
+  battery_entity: !input battery
+  temperature_entity: !input temperature
+  low: !input low
+  high: !input high
+  hot: !input hot
+
+trigger:
+  - platform: numeric_state
+    entity_id: !input battery
+    below: !input low
+    id: low
+  - platform: numeric_state
+    entity_id: !input battery
+    above: !input high
+    id: high
+  - platform: state
+    entity_id: !input battery
+    to: unavailable
+    for: "00:30:00"
+    id: lost
+  # Also look every 10 minutes and at start-up, which catches a hot battery and missed changes
+  - platform: time_pattern
+    minutes: "/10"
+    id: check
+  - platform: homeassistant
+    event: start
+    id: check
+
+action:
+  - variables:
+      level: "{{ states(battery_entity) | float(-1) }}"
+      too_hot: >-
+        {{ temperature_entity != '' and states(temperature_entity) | is_number
+           and states(temperature_entity) | float > hot | float }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ too_hot }}"
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input plug
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'lost' or trigger.id == 'low' or (level >= 0 and level <= low | float) }}
+        sequence:
+          # Low, or the tablet stopped reporting (it may be flat): charge
+          - service: switch.turn_on
+            target:
+              entity_id: !input plug
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'high' or level >= high | float }}"
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input plug

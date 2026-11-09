@@ -1,4 +1,4 @@
-"""Battery, Wi-Fi, last seen, version, page and uptime sensors."""
+"""Battery, Wi-Fi, last seen, version, page, uptime and screen sensors."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory
+from homeassistant.const import PERCENTAGE, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
@@ -32,6 +32,10 @@ def _int(v: Any) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) else None
 
 
+def _number(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def _text(v: Any) -> str | None:
     return v[:255] if isinstance(v, str) and v else None
 
@@ -44,6 +48,23 @@ SENSORS: tuple[KioskySensorDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d, s: _int(s.get("battery_level")),
+    ),
+    KioskySensorDescription(
+        key="battery_temperature",
+        name="Battery temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d, s: _number(s.get("battery_temperature")),
+    ),
+    KioskySensorDescription(
+        key="screen_state",
+        name="Screen",
+        icon="mdi:monitor",
+        device_class=SensorDeviceClass.ENUM,
+        options=["normal", "dim", "off"],
+        value_fn=lambda d, s: s.get("screen_state") if s.get("screen_state") in ("normal", "dim", "off") else None,
     ),
     KioskySensorDescription(
         key="wifi_signal",

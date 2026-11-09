@@ -20,6 +20,9 @@ send_command:
             - clear_web_data
             - check_update
             - show_message
+            - wake_screen
+            - announce
+            - reboot
             - identify
             - screenshot
           custom_value: true

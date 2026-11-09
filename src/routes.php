@@ -15,6 +15,7 @@ use Shepherd\Api\Admin\SsoApi;
 use Shepherd\Api\Admin\SystemApi;
 use Shepherd\Api\Admin\UsersApi;
 use Shepherd\Api\DeviceApi;
+use Shepherd\Api\ProvisioningApi;
 use Shepherd\Http\Response;
 use Shepherd\Http\Router;
 
@@ -30,6 +31,8 @@ return static function (Router $r): void {
     $r->post('/api/v1/device/commands/{id}/result', [DeviceApi::class, 'commandResult']);
     $r->get('/api/v1/device/releases/{id}/download', [DeviceApi::class, 'downloadRelease']);
     $r->post('/api/v1/device/live', [DeviceApi::class, 'liveFrame']);
+    // QR provisioning: the APK for a factory-reset tablet, authorised by an enrollment code
+    $r->get('/api/v1/provisioning/{code}/kiosky.apk', [ProvisioningApi::class, 'download']);
 
     // ---- Admin API (web console and integrations) ----------------------------
     $a = '/api/v1/admin';

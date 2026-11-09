@@ -214,6 +214,8 @@ final class Devices
         'page_error' => 'Page error',
         'low_uptime' => 'Low uptime',
         'low_battery' => 'Low battery',
+        'battery_hot' => 'Battery hot',
+        'battery_health' => 'Battery failing',
     ];
 
     /**
@@ -252,6 +254,16 @@ final class Devices
         $battery = $state['battery_level'] ?? null;
         if ($batteryBelow > 0 && is_int($battery) && $battery < $batteryBelow && ($state['charging'] ?? false) !== true && $d['online']) {
             $out['low_battery'] = "battery at {$battery}% and not charging";
+        }
+        // Kiosky 1.7.0+: tablets charging around the clock can overheat and swell
+        $hotAt = (int) Config::get('alerts.battery_hot', 45);
+        $temp = $state['battery_temperature'] ?? null;
+        if ($hotAt > 0 && (is_int($temp) || is_float($temp)) && $temp >= $hotAt && $d['online']) {
+            $out['battery_hot'] = 'battery at ' . round((float) $temp) . ' °C';
+        }
+        $health = $state['battery_health'] ?? null;
+        if (in_array($health, ['overheat', 'dead', 'over_voltage', 'failure'], true) && $d['online']) {
+            $out['battery_health'] = 'battery reports ' . str_replace('_', ' ', (string) $health);
         }
         return $out;
     }

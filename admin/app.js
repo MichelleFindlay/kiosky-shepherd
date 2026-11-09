@@ -1311,6 +1311,18 @@ function makeControl(def, value, releases, wasSet) {
         return el.value;
       };
       break;
+    case 'secret': {
+      // Stored secrets come back as {set: true}; leaving the box empty keeps them
+      const stored = wasSet && value && typeof value === 'object';
+      el = h('input', { type: 'password', autocomplete: 'new-password', placeholder: stored ? 'Saved; type to change' : '' });
+      get = () => (el.value === '' && stored ? undefined : el.value);
+      break;
+    }
+    case 'fingerprints':
+      el = h('textarea', { placeholder: 'one SHA-256 fingerprint per line, e.g. AB:12:…', class: 'mono' });
+      el.value = Array.isArray(value) ? value.join('\n') : '';
+      get = () => el.value.split(/[\r\n,]+/).map((x) => x.trim()).filter(Boolean);
+      break;
     default:
       el = h('input', { type: def.type === 'url' ? 'url' : 'text', value: value ?? '', placeholder: def.type === 'url' ? 'https://' : '' });
       get = () => el.value;
@@ -1865,7 +1877,10 @@ async function viewEnroll() {
       h('li', {}, 'Install Kiosky on the tablet and open it.'),
       h('li', {}, 'Open the toolbar (swipe from the top edge) and choose ', h('strong', {}, 'Enroll'), '.'),
       h('li', {}, 'Scan the QR code below, or type the server address and the code.'),
-      h('li', {}, 'The tablet locks to its profile\'s policy right away and appears under Devices.')));
+      h('li', {}, 'The tablet locks to its profile\'s policy right away and appears under Devices.')),
+    h('p', { class: 'sub' }, 'Or set up a factory-reset tablet with no computer: on its first setup screen, tap six times '
+      + 'in the same spot, then scan the code from "Provisioning QR". It joins Wi-Fi, installs Kiosky as the device owner '
+      + 'and enrolls by itself. Needs Kiosky 1.7.0 or later uploaded under Releases (or provisioning.apk_url in config.php).'));
 
   const list = h('div', { class: 'grid grid-2' });
   if (!tokens.length) list.append(h('div', { class: 'card empty' }, 'No active enrollment codes.'));
@@ -1891,6 +1906,15 @@ async function viewEnroll() {
               try { await navigator.clipboard.writeText(t.enroll_uri); toast('Enrollment link copied.'); } catch (e) { toast(t.enroll_uri); }
             },
           }, 'Copy link'),
+          t.provisioning ? h('button', {
+            class: 'small',
+            onclick: (e) => {
+              const card = e.target.closest('.enroll-card');
+              const open = card.querySelector('.provisioning');
+              if (open) { open.remove(); return; }
+              card.append(provisioningPanel(t));
+            },
+          }, 'Provisioning QR') : null,
           h('button', {
             class: 'small danger',
             onclick: async () => {
@@ -1900,6 +1924,39 @@ async function viewEnroll() {
           }, 'Revoke')))));
   }
   mainEl.append(h('div', { class: 'stack' }, h('div', { class: 'grid grid-2' }, h('div', { class: 'card' }, h('h2', {}, 'New enrollment code'), form), howto), list));
+}
+
+/**
+ * Android's setup-wizard QR for a factory-reset tablet. The Wi-Fi details are added
+ * here in the browser, so the password never reaches the server.
+ */
+function provisioningPanel(t) {
+  const ssid = h('input', { type: 'text', placeholder: 'Network name (SSID)', autocomplete: 'off' });
+  const pass = h('input', { type: 'password', placeholder: 'Password', autocomplete: 'new-password' });
+  const sec = h('select', {}, [['WPA', 'WPA/WPA2/WPA3'], ['WEP', 'WEP'], ['NONE', 'Open (no password)']]
+    .map(([v, l]) => h('option', { value: v }, l)));
+  const out = h('div', {});
+  const panel = h('div', { class: 'provisioning stack' },
+    h('h3', {}, 'Provisioning QR'),
+    h('p', { class: 'sub' }, 'Factory-reset the tablet. On the first setup screen, tap six times in the same spot to open '
+      + 'the QR scanner, then scan this. Leave Wi-Fi empty if the tablet is on Ethernet or you\'ll pick the network on the tablet.'),
+    h('div', { class: 'row' }, field('Wi-Fi network', ssid), field('Security', sec)),
+    field('Wi-Fi password', pass),
+    h('div', { class: 'actions' }, h('button', {
+      class: 'primary small',
+      onclick: () => {
+        const p = Object.assign({}, t.provisioning);
+        if (ssid.value.trim()) {
+          p['android.app.extra.PROVISIONING_WIFI_SSID'] = ssid.value.trim();
+          p['android.app.extra.PROVISIONING_WIFI_SECURITY_TYPE'] = sec.value;
+          if (sec.value !== 'NONE') p['android.app.extra.PROVISIONING_WIFI_PASSWORD'] = pass.value;
+        }
+        clear(out);
+        try { out.append(window.QR.svg(JSON.stringify(p))); } catch (e) { out.append(h('div', { class: 'error-text' }, 'Too much to fit in a QR code.')); }
+      },
+    }, 'Show QR')),
+    out);
+  return panel;
 }
 
 /* ----------------------------------------------------------------- commands */
