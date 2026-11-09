@@ -106,6 +106,10 @@ return [
     // Uploaded APKs must have this package name (Kiosky's applicationId).
     'apk_package' => 'uk.lp0.ha',
     'max_apk_mb' => 150,
+
+    // Pause a release's rollout once this many tablets report it crashing right after
+    // updating (Kiosky 1.8.0+ sends update_unhealthy). See README, Staged rollouts.
+    'rollouts' => ['halt_after' => 1],
     'max_screenshot_mb' => 4,
 
     'command_ttl_hours' => 24,          // queued commands expire after this

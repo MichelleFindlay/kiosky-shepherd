@@ -44,7 +44,7 @@ final class ReleasesApi
     {
         $out = [];
         foreach (Db::all(Devices::select() . " WHERE d.status = 'active'") as $d) {
-            $t = Releases::targetFor(Policy::forDevice($d));
+            $t = Releases::targetFor(Policy::forDevice($d), $d);
             if ($t !== null) {
                 $out[$t['version']] = ($out[$t['version']] ?? 0) + 1;
             }
@@ -208,7 +208,14 @@ final class ReleasesApi
             throw HttpError::validation(['channel' => Releases::hasChannels()
                 ? 'Use stable or dev.' : 'Release channels need the latest database update.']);
         }
-        $id = Db::insert('releases', ($channel !== 'stable' ? ['channel' => $channel] : []) + [
+        $rolloutHours = trim((string) ($_POST['rollout_hours'] ?? ''));
+        if ($rolloutHours !== '' && (!ctype_digit($rolloutHours) || (int) $rolloutHours > 720 || !Releases::hasRollouts())) {
+            @unlink("$dir/$fileName");
+            throw HttpError::validation(['rollout_hours' => Releases::hasRollouts()
+                ? 'Use 0 (everyone at once) to 720 hours.' : 'Staged rollouts need the latest database update.']);
+        }
+        $rollout = Releases::hasRollouts() ? ['rollout_hours' => (int) $rolloutHours, 'rollout_start' => Util::now()] : [];
+        $id = Db::insert('releases', $rollout + ($channel !== 'stable' ? ['channel' => $channel] : []) + [
             'version_name' => $versionName,
             'version_code' => $versionCode,
             'sha256' => $sha,
@@ -221,7 +228,10 @@ final class ReleasesApi
         return Response::json(Releases::present(Db::one(self::SELECT . ' WHERE r.id = :id', ['id' => $id])), 201);
     }
 
-    /** PATCH /api/v1/admin/releases/{id}  {notes?, active?, channel?} — inactive releases are not offered to devices */
+    /**
+     * PATCH /api/v1/admin/releases/{id}  {notes?, active?, channel?, rollout_hours?, halted?, restart_rollout?}
+     * Inactive and paused (halted) releases are not offered to devices.
+     */
     public static function update(Request $req): Response
     {
         $p = AdminAuth::require($req, 'admin');
@@ -246,6 +256,28 @@ final class ReleasesApi
                 throw HttpError::conflict('Release channels need the latest database update.');
             }
             $changes['channel'] = $b['channel'];
+        }
+        if (array_key_exists('rollout_hours', $b) || array_key_exists('halted', $b) || !empty($b['restart_rollout'])) {
+            if (!Releases::hasRollouts()) {
+                throw HttpError::conflict('Staged rollouts need the latest database update.');
+            }
+        }
+        if (array_key_exists('rollout_hours', $b)) {
+            if (!is_int($b['rollout_hours']) || $b['rollout_hours'] < 0 || $b['rollout_hours'] > 720) {
+                throw HttpError::validation(['rollout_hours' => 'Use 0 (everyone at once) to 720 hours.']);
+            }
+            $changes['rollout_hours'] = $b['rollout_hours'];
+        }
+        if (array_key_exists('halted', $b)) {
+            if (!is_bool($b['halted'])) {
+                throw HttpError::validation(['halted' => 'Must be true or false.']);
+            }
+            // Pausing by hand; resuming clears the reason too
+            $changes['halted_at'] = $b['halted'] ? Util::now() : null;
+            $changes['halt_reason'] = $b['halted'] ? 'Paused by ' . $p->name : null;
+        }
+        if (!empty($b['restart_rollout'])) {
+            $changes['rollout_start'] = Util::now(); // back to the first devices in the queue
         }
         if ($changes !== []) {
             Db::update('releases', $changes, ['id' => $id]);

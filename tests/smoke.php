@@ -247,6 +247,36 @@ $pol = expect($device, 200, 'POST', "$D/checkin", [])['policy'];
 check(($pol['http_auth']['password'] ?? null) === ' s3cret ' && count($pol['trusted_certificates'] ?? []) === 1
     && ($pol['trusted_certificates'][0] ?? '') === implode(':', str_split(strtoupper($fp), 2)),
     'the device gets the password and one normalised fingerprint', $pol);
+// Kiosky 1.8.0: shared tablets, MQTT, Wi-Fi and GitHub rollout spread
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['mqtt.host' => 'mqtt://ha.local']]);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['mqtt.topic' => 'kiosky/#']]);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['mqtt.fingerprint' => 'ab:cd']]);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['wifi.networks' => "Office | short"]]);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['wifi.networks' => "Office | password1\nOffice | password2"]]);
+expect($admin, 422, 'PATCH', "$A/profiles/1", ['settings' => ['wifi.networks' => "Office | (saved) | wpa2"]]); // nothing saved to keep
+expect($admin, 200, 'PATCH', "$A/profiles/1", ['settings' => ['session.clear_on_idle' => true, 'mqtt.host' => '192.168.1.10',
+    'mqtt.password' => 'mq pass', 'mqtt.topic' => '/wall/hall/', 'mqtt.fingerprint' => $fp, 'updates.rollout_hours' => 48,
+    'wifi.networks' => "Office | office-pass | wpa3 | hidden\nGuest", 'touch.long_press' => false, 'input.nfc' => true,
+    'screen.pixel_shift' => true, 'offline.last_page' => false]]);
+$prof = expect($admin, 200, 'GET', "$A/profiles");
+$s1 = (array) (array_values(array_filter($prof, static fn ($p) => (int) $p['id'] === 1))[0]['settings'] ?? []);
+check(($s1['wifi.networks'][0]['password'] ?? null) === ['set' => true] && ($s1['wifi.networks'][1]['security'] ?? null) === 'open'
+    && ($s1['mqtt.password'] ?? null) === ['set' => true], 'Wi-Fi and MQTT passwords are hidden from the console', $s1);
+expect($admin, 200, 'PATCH', "$A/profiles/1", ['settings' => ['wifi.networks' => "Office | (saved) | wpa3 | hidden\nGuest | | open\nNew | new-pass-1"]]);
+$pol = expect($device, 200, 'POST', "$D/checkin", [])['policy'];
+check(($pol['wifi']['networks'][0] ?? null) === ['ssid' => 'Office', 'password' => 'office-pass', 'security' => 'wpa3', 'hidden' => true]
+    && count($pol['wifi']['networks']) === 3 && ($pol['session']['clear_on_idle'] ?? null) === true
+    && ($pol['mqtt']['topic'] ?? null) === 'wall/hall' && ($pol['mqtt']['password'] ?? null) === 'mq pass'
+    && ($pol['mqtt']['port'] ?? null) === 1883 && ($pol['updates']['rollout_hours'] ?? null) === 48
+    && ($pol['touch']['long_press'] ?? null) === false && ($pol['input']['nfc'] ?? null) === true
+    && ($pol['screen']['pixel_shift'] ?? null) === true && ($pol['offline']['last_page'] ?? null) === false,
+    'Kiosky 1.8.0 keys reach the device, with the kept Wi-Fi password', $pol);
+expect($admin, 422, 'PATCH', "$A/devices/$id", ['overrides' => ['wifi.networks' => "Office | (saved)"]]); // overrides keep their own
+$ci = expect($device, 200, 'POST', "$D/checkin", ['status' => ['safe_mode' => true, 'update_health' => 'unhealthy', 'wifi_config' => 'reverted']]);
+$dv = expect($admin, 200, 'GET', "$A/devices/$id");
+check(($dv['state']['wifi_config'] ?? null) === 'reverted', 'Kiosky 1.8.0 status keys are stored', $dv['state']);
+expect($device, 200, 'POST', "$D/checkin", ['status' => ['screen_on' => true]]);
+
 $restored = expect($admin, 200, 'POST', "$A/profiles/1/versions/{$baseline['id']}/restore");
 check((array) $restored['settings'] === [], 'restore puts the profile back as it was', $restored['settings']);
 $hist = expect($admin, 200, 'GET', "$A/profiles/1/versions");
@@ -299,6 +329,32 @@ if (isset($byName['1.0.0'], $byName['1.1.0-dev.1'])) {
     $pol = expect($admin, 200, 'GET', "$A/devices/$id/policy");
     check(($pol['update']['version'] ?? null) === '1.1.0-dev.1', 'a promoted build reaches the stable channel', $pol['update']);
     expect($admin, 200, 'PATCH', "$A/releases/{$byName['1.1.0-dev.1']['id']}", ['channel' => 'dev']);
+
+    // Staged rollout: just started over 720 h, so this device's turn hasn't come
+    $stable = $byName['1.0.0']['id'];
+    expect($admin, 422, 'PATCH', "$A/releases/$stable", ['rollout_hours' => 9999]);
+    $r = expect($admin, 200, 'PATCH', "$A/releases/$stable", ['rollout_hours' => 720, 'restart_rollout' => true]);
+    check($r['rollout_hours'] === 720 && $r['rollout_percent'] === 0, 'a rollout starts at 0%', $r);
+    $ci = expect($device, 200, 'POST', "$D/checkin", []);
+    check($ci['update'] === null, 'a device whose turn hasn\'t come gets no update', $ci['update']);
+    expect($admin, 200, 'PATCH', "$A/releases/$stable", ['rollout_hours' => 0]);
+    $ci = expect($device, 200, 'POST', "$D/checkin", []);
+    check(($ci['update']['version'] ?? null) === '1.0.0', 'without a spread every device gets it', $ci['update']);
+    // A device reporting the release crashing pauses it
+    expect($device, 200, 'POST', "$D/checkin", ['events' => [['type' => 'update_unhealthy', 'at' => gmdate('c'),
+        'data' => ['version' => '1.0.0', 'version_code' => 100, 'previous_version' => '0.9.0', 'previous_version_code' => 90,
+            'crashes' => 2, 'last_crash' => 'java.lang.IllegalStateException: ci']]]]);
+    $rels = array_column(expect($admin, 200, 'GET', "$A/releases"), null, 'version_name');
+    check($rels['1.0.0']['halted_at'] !== null && $rels['1.0.0']['unhealthy_count'] === 1
+        && str_contains((string) $rels['1.0.0']['halt_reason'], 'IllegalStateException'), 'an unhealthy report pauses the rollout', $rels['1.0.0']);
+    $ci = expect($device, 200, 'POST', "$D/checkin", []);
+    check($ci['update'] === null, 'a paused release isn\'t offered', $ci['update']);
+    $r = expect($admin, 200, 'PATCH', "$A/releases/$stable", ['halted' => false]);
+    check($r['halted_at'] === null && $r['halt_reason'] === null, 'resuming clears the pause', $r);
+    expect($device, 200, 'POST', "$D/checkin", ['events' => [['type' => 'update_healthy', 'at' => gmdate('c'),
+        'data' => ['version' => '1.0.0', 'version_code' => 100, 'crashes' => 0]]]]);
+    $rels = array_column(expect($admin, 200, 'GET', "$A/releases"), null, 'version_name');
+    check($rels['1.0.0']['healthy_count'] === 1 && $rels['1.0.0']['halted_at'] === null, 'healthy reports are counted', $rels['1.0.0']);
 } else {
     echo "skip - release channel checks (no seeded releases)\n";
 }

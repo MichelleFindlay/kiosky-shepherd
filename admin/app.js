@@ -71,6 +71,7 @@ function fmtValue(v) {
   if (v === false) return 'Off';
   if (v === null || v === undefined) return 'none';
   if (v === '') return '(empty)';
+  if (Array.isArray(v) && v.length && typeof v[0] === 'object' && v[0] && 'ssid' in v[0]) return v.map((n) => n.ssid).join(', ');
   if (Array.isArray(v)) return v.length ? v.join(', ') : '(any)';
   if (typeof v === 'object' && v.set) return 'set';
   if (typeof v === 'object') return JSON.stringify(v);
@@ -1318,6 +1319,14 @@ function makeControl(def, value, releases, wasSet) {
       get = () => (el.value === '' && stored ? undefined : el.value);
       break;
     }
+    case 'wifi':
+      // Saved passwords come back as {set: true} and show as (saved), which keeps them
+      el = h('textarea', { placeholder: 'Office | password | wpa2\nGuest | | open\nBackroom | password | wpa3 | hidden', class: 'mono', autocomplete: 'off' });
+      el.value = Array.isArray(value) ? value.map((n) => [n.ssid,
+        n.password && typeof n.password === 'object' ? '(saved)' : (n.password || ''),
+        n.security || 'wpa2', n.hidden ? 'hidden' : ''].join(' | ').replace(/[ |]+$/, '')).join('\n') : '';
+      get = () => el.value;
+      break;
     case 'fingerprints':
       el = h('textarea', { placeholder: 'one SHA-256 fingerprint per line, e.g. AB:12:…', class: 'mono' });
       el.value = Array.isArray(value) ? value.join('\n') : '';
@@ -2102,7 +2111,7 @@ async function viewReleases() {
     list.append(h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, h('th', {}, 'Version'), h('th', {}, 'Channel'), h('th', { class: 'num hide-sm' }, 'Code'), h('th', { class: 'hide-sm' }, 'Size'), h('th', { class: 'hide-sm' }, 'SHA-256'),
         h('th', { class: 'num hide-sm' }, 'Devices on it'), h('th', { class: 'num hide-sm', title: 'Devices whose profile, ring or override points at this release' }, 'Targeted'),
-        h('th', { class: 'hide-sm' }, 'Uploaded'), h('th', {}, 'Offered'), h('th', {}))),
+        h('th', { class: 'hide-sm' }, 'Uploaded'), h('th', {}, 'Offered'), h('th', {}, 'Rollout'), h('th', {}))),
       h('tbody', {}, releases.map((r) => h('tr', {},
         h('td', {}, h('strong', {}, r.version_name), r.notes ? h('div', { class: 'sub' }, r.notes) : null),
         h('td', {}, r.channel === 'dev' ? h('span', { class: 'chip warn', title: 'Only devices on the dev channel get this as "latest"' }, 'Dev')
@@ -2114,7 +2123,30 @@ async function viewReleases() {
         h('td', { class: 'num hide-sm' }, r.devices_targeted ?? 0),
         h('td', { class: 'hide-sm' }, when(r.created_at), r.uploaded_by ? h('div', { class: 'sub' }, r.uploaded_by) : null),
         h('td', {}, r.active ? h('span', { class: 'chip ok' }, 'Yes') : h('span', { class: 'chip' }, 'Withdrawn')),
+        h('td', {}, rolloutCell(r)),
         h('td', {}, can('admin') ? h('div', { class: 'actions' },
+          h('button', {
+            class: 'small',
+            title: r.halted_at ? 'Offer it to devices again' : 'Stop offering it to devices that don\'t have it yet',
+            onclick: async () => {
+              try {
+                await api.patch(`/admin/releases/${r.id}`, { halted: !r.halted_at });
+                toast(r.halted_at ? `${r.version_name} is offered again.` : `${r.version_name} is paused.`);
+                route();
+              } catch (ex) { fail(ex); }
+            },
+          }, r.halted_at ? 'Resume' : 'Pause'),
+          h('button', {
+            class: 'small',
+            title: 'Spread this release over some hours, so a bad one reaches only some devices before it can be paused',
+            onclick: async () => {
+              const v = window.prompt(`Spread ${r.version_name} over how many hours? 0 offers it to every device at once. The rollout starts again from the first devices.`, String(r.rollout_hours || 24));
+              if (v === null) return;
+              const hours = parseInt(v, 10);
+              if (Number.isNaN(hours)) { toast('Enter a number of hours.'); return; }
+              try { await api.patch(`/admin/releases/${r.id}`, { rollout_hours: hours, restart_rollout: true }); route(); } catch (ex) { fail(ex); }
+            },
+          }, 'Rollout…'),
           h('button', {
             class: 'small',
             onclick: async () => { try { await api.patch(`/admin/releases/${r.id}`, { active: !r.active }); route(); } catch (ex) { fail(ex); } },
@@ -2145,6 +2177,7 @@ async function viewReleases() {
     const notes = h('input', { type: 'text' });
     const channel = h('select', {}, h('option', { value: 'stable' }, 'Stable: every device on "latest"'),
       h('option', { value: 'dev' }, 'Dev: only devices on the dev channel'));
+    const rollout = h('input', { type: 'number', min: 0, max: 720, value: 0 });
     const vName = h('input', { type: 'text', placeholder: 'read from APK' });
     const vCode = h('input', { type: 'number', placeholder: 'read from APK' });
     const button = h('button', { class: 'primary', type: 'submit' }, 'Upload');
@@ -2158,6 +2191,7 @@ async function viewReleases() {
           fd.append('apk', file.files[0]);
           fd.append('notes', notes.value);
           fd.append('channel', channel.value);
+          fd.append('rollout_hours', rollout.value || '0');
           if (vName.value) fd.append('version_name', vName.value);
           if (vCode.value) fd.append('version_code', vCode.value);
           button.disabled = true;
@@ -2169,8 +2203,26 @@ async function viewReleases() {
         },
       }, field('APK file', file), field('Release notes', notes),
       field('Channel', channel, 'Upload test builds as dev, try them on a few tablets (set their Release channel to dev, or use a ring), then promote to stable.'),
+      field('Spread over (hours)', rollout, 'Devices get it gradually over this time, each at a fixed point, so a bad release reaches only some of them. '
+        + 'Kiosky 1.8.0+ reports a version that crashes right after updating, and the rollout pauses by itself. 0: every device at once.'),
       advanced, button)));
   }
+}
+
+/** Progress of a staged rollout, whether it's paused, and what updated devices reported. */
+function rolloutCell(r) {
+  const health = (r.healthy_count || r.unhealthy_count)
+    ? h('div', { class: 'sub', title: 'Reported by Kiosky 1.8.0+ in the 15 minutes after updating' },
+      `${r.healthy_count} fine, ${r.unhealthy_count} crashing`) : null;
+  if (r.halted_at) {
+    return h('div', {}, h('span', { class: 'chip bad', title: r.halt_reason || '' }, 'Paused'),
+      r.halt_reason ? h('div', { class: 'sub' }, r.halt_reason) : null, health);
+  }
+  if (r.rollout_hours > 0 && r.rollout_percent < 100) {
+    return h('div', {}, h('span', { class: 'chip warn' }, `${r.rollout_percent}%`),
+      h('div', { class: 'sub' }, `of devices, over ${r.rollout_hours} h`), health);
+  }
+  return h('div', {}, h('span', { class: 'chip ok' }, 'All devices'), health);
 }
 
 // Staged rollouts: a release per tag, e.g. "canary" gets the newest APK before everyone else

@@ -76,7 +76,7 @@ final class Alerts
     /** Problem alerts switched on (offline is always on while alerts are configured). @return list<string> */
     public static function enabledProblems(): array
     {
-        $v = Config::get('alerts.problems', ['page_error', 'lockdown', 'low_battery', 'battery_hot', 'battery_health']);
+        $v = Config::get('alerts.problems', ['page_error', 'lockdown', 'low_battery', 'battery_hot', 'battery_health', 'update_unhealthy', 'wifi']);
         return array_values(array_intersect(is_array($v) ? $v : [], array_keys(Devices::PROBLEMS)));
     }
 

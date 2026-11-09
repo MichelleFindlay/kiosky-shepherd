@@ -126,7 +126,7 @@ final class DeviceApi
             'name' => $device['name'],
             'server_time' => gmdate('c'),
             'policy' => $policy,
-            'update' => Releases::targetFor($policy),
+            'update' => Releases::targetFor($policy, $device),
             'commands' => [],
             'checkin_seconds' => (int) $policy['checkin_seconds'],
         ], 201);
@@ -197,6 +197,13 @@ final class DeviceApi
                     $json = Db::json(['at' => $data['at'], 'data' => 'truncated']);
                 }
                 Db::insert('device_events', ['device_id' => $deviceId, 'type' => substr($type, 0, 48), 'data' => $json]);
+                if ($type === 'update_healthy' || $type === 'update_unhealthy') {
+                    try { // staged rollouts: count it, and pause a release that keeps crashing
+                        Releases::recordHealth($device, $type, $e['data'] ?? null);
+                    } catch (\Throwable $ex) {
+                        error_log('[kiosky-shepherd] update health for device ' . $deviceId . ': ' . $ex->getMessage());
+                    }
+                }
             }
         }
 
@@ -211,7 +218,7 @@ final class DeviceApi
             'server_time' => gmdate('c'),
             'device' => ['id' => $device['uid'], 'name' => $device['name']],
             'policy' => $policy,
-            'update' => Releases::targetFor($policy),
+            'update' => Releases::targetFor($policy, $device),
             'commands' => Commands::deliver($deviceId),
             'checkin_seconds' => self::nextCheckin($device, (int) $policy['checkin_seconds']),
         ]);

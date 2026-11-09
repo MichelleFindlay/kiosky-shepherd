@@ -284,7 +284,7 @@ final class DevicesApi
             'overrides' => (object) Policy::redact($overrides),
             'version' => $devicePolicy['version'],
             'applied_version' => $d['applied_policy_version'],
-            'update' => Releases::targetFor($devicePolicy),
+            'update' => Releases::targetFor($devicePolicy, $d),
         ]);
     }
 

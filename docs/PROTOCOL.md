@@ -230,6 +230,17 @@ straight after finishing any command.
   | `reboot_supported` | `reboot` and `reboot_at` reboot the tablet (device owner, Android 7+) |
   | `volume_percent` | Media volume, 0–100 |
   | `playlist_index` | With a playlist: -1 on the start page, otherwise the playlist page shown |
+
+  Kiosky 1.8.0+ also sends these. The overview flags `safe_mode` / an unhealthy
+  `update_health`, and `wifi_config` values `reverted`, `failed` and `not_device_owner`.
+
+  | Key | Meaning |
+  | --- | --- |
+  | `mqtt` | `off`, `connecting`, `connected` or `error: …` |
+  | `wifi_config` | `off`, `pending`, `applied`, `reverted`, `failed` or `not_device_owner` |
+  | `wifi_ssid` | The Wi-Fi network in use, when Android reveals it (a device owner grants itself the location permission once the policy has networks) |
+  | `update_health` | `trial`, `healthy` or `unhealthy`, after an update |
+  | `safe_mode` | This version crashed right after updating; optional features are off |
 - `events`: anything that happened since the last successful check-in, oldest
   first, at most 50. Keep them queued locally until a check-in succeeds.
   Suggested types: `page_error`, `page_loaded`, `policy_applied`,
@@ -245,6 +256,12 @@ straight after finishing any command.
   `subresource`), `screensaver` (`state`), `rebooting` / `restarting` (`reason`) and
   `reboot_failed`, and sends `page_error` for main-frame HTTP errors too, with the
   HTTP status as `code`.
+  Kiosky 1.8.0+ adds `session_cleared` (`reason`: `idle` or `mqtt`, `url`),
+  `update_unhealthy` / `update_healthy` (`version`, `version_code`,
+  `previous_version`, `previous_version_code`, `crashes`, and `last_crash` when
+  unhealthy), `wifi_changed` / `wifi_failed` (`networks`, `failed`), `wifi_applied`
+  (`networks`, `removed`, `ssid`) and `wifi_reverted` (`restored`, `networks`).
+  `app_started` carries `safe_mode: true` in safe mode.
 
 **200 OK**
 
@@ -338,7 +355,8 @@ success.
     "dim_at": "",
     "dim_until": "",
     "dim_brightness": 15,
-    "idle_dim_minutes": 0
+    "idle_dim_minutes": 0,
+    "pixel_shift": false
   },
 
   "battery": { "protect": false },
@@ -349,6 +367,19 @@ success.
   "trusted_certificates": [],
   "screensaver": { "minutes": 0, "url": "" },
   "audio": { "volume": -1, "quiet_at": "", "quiet_until": "", "quiet_volume": 0 },
+
+  "session": { "clear_on_idle": false },
+  "offline": { "last_page": true },
+  "touch": { "zoom": false, "long_press": true, "text_selection": true },
+  "input": { "nfc": false, "barcode": true },
+  "mqtt": {
+    "host": "", "port": 1883, "tls": false, "fingerprint": "",
+    "username": "", "password": "", "topic": "", "name": "",
+    "discovery": true, "discovery_prefix": "homeassistant"
+  },
+  "wifi": {
+    "networks": [ { "ssid": "Office", "password": "…", "security": "wpa2", "hidden": false } ]
+  },
 
   "toolbar": {
     "mode": "hidden",
@@ -361,7 +392,8 @@ success.
     "channel": "stable",
     "release": "latest",
     "auto_install": true,
-    "check_hours": 12
+    "check_hours": 12,
+    "rollout_hours": 0
   },
 
   "checkin_seconds": 60
@@ -409,6 +441,13 @@ older apps. If a key is missing, use the default shown above.
 | `idle_home_minutes` | After this many minutes without a touch, load `url` if the page isn't already it (0: never). "Already it" includes where `url` redirected to. Kiosky 1.7.0+. |
 | `watchdog_minutes` | Every 15 s Kiosky runs `evaluateJavascript("1")`. With no answer for this long, reload; if the next check fails too, replace the WebView (0: off). Kiosky 1.7.0+. |
 | `media.camera`, `media.microphone` | Grant a page's `onPermissionRequest` for video/audio capture when on, and only to https origins on the `url` host, matching an `allowed_hosts` entry, or an admin-sent `navigate` page. An empty `allowed_hosts` allows no further hosts here. Kiosky asks Android for CAMERA / RECORD_AUDIO when needed; as device owner it grants them itself. Kiosky 1.7.0+. |
+| `session.clear_on_idle` | When `idle_home_minutes` returns to `url`, also clear cookies, Web Storage, the cache, form data and history, if the tablet was touched since the last clear. Reported as `session_cleared` (`reason`: `idle`). For shared, public tablets. Kiosky 1.8.0+. |
+| `offline.last_page` | While the "Reconnecting…" cover is up, show a greyed-out picture of the last page that loaded properly on that host (taken 8 s after a good load and every 10 minutes, kept across restarts; not of a `session.clear_on_idle` tablet's other pages). Kiosky 1.8.0+. |
+| `touch.zoom`, `touch.long_press`, `touch.text_selection` | Pinch to zoom (`setBuiltInZoomControls`); long presses (off: consumed, so no selection, its action menu or link previews); selecting page text (off: injected `user-select: none` except form fields). Kiosky 1.8.0+. |
+| `screen.pixel_shift` | Every 3 minutes, translate the whole view along an 8-step circle of at most 2 px, against burn-in. Kiosky 1.8.0+. |
+| `input.nfc`, `input.barcode` | NFC reader mode while in front (tag id, techs and NDEF records), and keyboard-style barcode scanners (a burst of keys under 60 ms apart ending in Enter or Tab). Scans go to trusted pages as `kiosky:nfc` / `kiosky:barcode` DOM events and to MQTT (`<base>/nfc`, `<base>/barcode`). Not reported to the server. Kiosky 1.8.0+. |
+| `mqtt.*` | Local control over MQTT 3.1.1 (Kiosky 1.8.0+). `host` empty: off. `port` (1883; 8883 is usual with `tls`), `tls`, `fingerprint` (SHA-256 of a self-signed broker certificate, trusted instead of the system CAs and hostname check), `username`, `password` (redacted in the console, sent in clear to devices), `topic` (base topic; empty: `kiosky/` + the first 8 characters of `android_id`), `name` (Home Assistant device name; empty: the device's name), `discovery` and `discovery_prefix` (Home Assistant MQTT discovery). The topics and commands are listed in Kiosky's help (*Home Assistant and MQTT*). Commands that open pages still obey `allowed_hosts`. Reported as status `mqtt`. |
+| `wifi.networks` | Wi-Fi networks to save on the tablet (Kiosky 1.8.0+), first preferred, at most 10: `ssid`, `password` (8–63 characters or 64 hex digits; empty for `open`), `security` (`wpa2`, `wpa3` or `open`), `hidden`. Needs device owner on Android 10+ (`WifiManager.addNetwork`). Empty list: leave Wi-Fi alone. New networks are added before old ones go; networks Kiosky saved that are no longer listed are removed once Wi-Fi works again, never the one in use. A changed password or security type is reverted if Wi-Fi isn't connected 10 minutes later (`wifi_reverted`), and that list isn't retried until it changes. The console redacts passwords as `{"set": true}`; sending that back (or `(saved)` in the text form) keeps the stored one. Reported as status `wifi_config`. |
 | `battery.protect` | Turn on the tablet's own charging limit. Experimental: Samsung `Settings.Global protect_battery`, which needs `adb shell pm grant uk.lp0.ha android.permission.WRITE_SECURE_SETTINGS`. Reported as `battery_protect`. Kiosky only turns it off again if it turned it on. Kiosky 1.7.0+. |
 
 ### 5.3 Technician unlock (PIN)
@@ -467,6 +506,15 @@ sensors (for example a Home Assistant motion sensor):
 | `setBrightness(percent)` | Trusted page | 1–100 until changed; 0 or less: the tablet's own brightness |
 | `screenOff()` | Trusted page | Black screen until a touch, `wake()`, `wake_screen` or motion |
 | `deviceName()` | Trusted page | The Shepherd device name (`""` otherwise) |
+| `speak(text)` | Trusted page | Reads the text aloud (Kiosky 1.8.0+) |
+| `battery()` | Trusted page | JSON text `{level, charging, temperature}`, or `null` (1.8.0+) |
+| `setUrl(url)` | Trusted page | Opens an http(s) address until the next return to `url`; `allowed_hosts` still applies (1.8.0+) |
+| `watchMotion(on)` | Trusted page | Sends `kiosky:motion` events (`detail.source`: `proximity` or `light`) until the page navigates; `false` without a sensor (1.8.0+) |
+| `nfcAvailable()` | Any page | `true` while `input.nfc` is on and NFC is switched on (1.8.0+) |
+
+Kiosky 1.8.0+ also dispatches DOM events on trusted pages: `kiosky:motion` (after
+`watchMotion(true)`), `kiosky:nfc` (`detail`: `id`, `techs`, `records`) and
+`kiosky:barcode` (`detail.code`).
 
 A trusted page is one whose address is on the `url` host or an `allowed_hosts`
 entry, or an admin-sent `navigate` page. Methods return `false` when refused.
@@ -500,6 +548,25 @@ For `server`:
 - Never try to downgrade. Android refuses, and the server only targets newer
   builds anyway.
 - Don't retry a failed install of the same `version_code` more than once an hour.
+
+**Staged rollouts** (server 1.8.0+). A release can have `rollout_hours`: each device
+gets a fixed place in the queue (from a hash of its id), and the release is offered
+to it once that share of the time has passed since the rollout started. Until then,
+`update` is the newest release that has reached the device, so devices keep moving
+up. A **paused** release isn't offered to anyone who doesn't have it yet.
+
+**Update health** (Kiosky 1.8.0+). For 15 minutes after a new version code first
+starts, Kiosky counts uncaught crashes. Two make it unhealthy: it sends
+`update_unhealthy` and runs in safe mode (status `safe_mode: true`) until a newer
+version arrives. Surviving the trial sends `update_healthy`. The server counts both
+per release, and pauses the release's rollout after `rollouts.halt_after` (in
+`config.php`, default 1) unhealthy reports, with an alert and a `release.halted`
+event webhook. Android can't downgrade, so to roll back, upload the previous
+version rebuilt with a higher `versionCode`.
+
+For `github`, `rollout_hours` in the policy does the same on the device: with
+`auto_install`, each tablet installs a release at its own point within that many
+hours of its `published_at`. A `check_update` command skips the wait.
 
 ## 7. Commands
 

@@ -25,6 +25,7 @@ final class Events
         'device.profile_changed' => 'A device moved to another profile',
         'command.failed' => 'A command failed on a device',
         'profile.updated' => 'A profile was changed',
+        'release.halted' => 'A release\'s rollout was paused because devices reported it crashing',
     ];
 
     private const MAX_ATTEMPTS = 8;

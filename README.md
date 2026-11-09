@@ -45,7 +45,9 @@ The Kiosky app needs to implement the client side, which is specified in
 **Lock the tablet to Kiosky** setting needs Kiosky 1.4.0 or later. The screen
 schedule and dimming, going back to the start page when idle, the frozen-page
 watchdog, camera and microphone access, battery care and the **Wake the screen**
-command need Kiosky 1.7.0 or later.
+command need Kiosky 1.7.0 or later. Shared-tablet sign-out, MQTT for Home
+Assistant, Wi-Fi networks, update health reports, the touch and scanner settings,
+burn-in protection and the greyed-out offline page need Kiosky 1.8.0 or later.
 
 ## Requirements
 
@@ -202,6 +204,14 @@ It also adds CIDR ranges and the `cloudflare` / `private` presets to `trusted_pr
 hot or failing batteries are now reported too; untick them under
 Server → Settings → Alerts if you only want offline alerts. Uploading files by
 hand: copy every file, as usual, keeping `config/config.php` and `storage/`.
+
+**1.8.0** adds `sql/migrations/007_rollouts.sql` (applied automatically) for
+spreading a release over hours and pausing it when tablets report it crashing (see
+[Staged rollouts](#staged-rollouts)), and new policy settings (shared tablets, MQTT,
+Wi-Fi, touch and scanners, burn-in protection, the offline page, GitHub rollout
+spread), so every device's policy version changes once. With
+alerts set up, a crashing Kiosky update and Wi-Fi settings that didn't apply are
+reported too.
 
 **1.5.0** adds `sql/migrations/005_release_channels.sql` (applied automatically)
 and the **Release channel** policy setting, so device policies change once more.
@@ -486,6 +496,26 @@ release is targeted at. When it looks good, move the profiles over and remove th
 ring. A device's own `updates.release` override still wins, and a device in
 several rings follows the newest release.
 
+**Spreading a release over time** works without tags. Give a release a **spread**
+in hours (when uploading, or **Rollout…** in the release table): each device has a
+fixed place in the queue, so the release reaches 10% of them after a tenth of the
+time, and so on. Until a device's turn, it's offered the newest release that has
+reached it. The table shows how far each rollout has got.
+
+**Pausing.** Kiosky 1.8.0 and later report how a new version does in its first 15
+minutes: `update_healthy`, or `update_unhealthy` if it crashed twice (the tablet
+then runs in a safe mode until a newer version arrives). The first unhealthy report
+**pauses** the release: no more devices are offered it, an alert goes out, and the
+`release.halted` event webhook fires. Set `'rollouts' => ['halt_after' => 3]` in
+`config/config.php` to wait for more reports. **Pause** and **Resume** in the
+release table do the same by hand. Android never lets an app downgrade, so tablets
+that already have a bad release need a newer one: rebuild the previous version with
+a higher version code and upload that.
+
+With the `github` update source, the **GitHub rollout spread** policy setting does
+the same on the tablets themselves, counted from when the GitHub release was
+published.
+
 ## Server settings in the console
 
 **Server → Settings** lets admins change everyday settings without editing files:
@@ -620,7 +650,11 @@ Each tablet becomes a device with:
 
 It polls every 30 seconds, and tablets enrolled later appear on their own. Commands
 reach a tablet at its next check-in, so set a short check-in interval on profiles
-used for instant reactions. For example, when the doorbell rings:
+used for instant reactions. For instant control without the server in between, Kiosky 1.8.0 and
+later can also connect to Home Assistant's MQTT broker directly (the **Home
+Assistant (MQTT)** policy settings); that adds the tablet to Home Assistant as a
+second, MQTT device with its own screen, brightness, volume, page, announce and
+motion entities. For example, when the doorbell rings:
 
 ```yaml
 automation:
@@ -798,8 +832,8 @@ JSON out. Errors are `{"error": {"code", "message", "details"}}`.
 | `GET/POST /api/v1/admin/enrollment-tokens` | operator | `{profile_id, label, name_prefix, expires_hours, max_uses}` |
 | `DELETE /api/v1/admin/enrollment-tokens/{id}` | operator | Revoke |
 | `GET /api/v1/admin/releases` | viewer | Uploaded APKs |
-| `POST /api/v1/admin/releases` | admin | multipart: `apk`, `notes`, `channel` (`stable` or `dev`) |
-| `PATCH/DELETE /api/v1/admin/releases/{id}` | admin | `{active, notes, channel}` / delete |
+| `POST /api/v1/admin/releases` | admin | multipart: `apk`, `notes`, `channel` (`stable` or `dev`), `rollout_hours` |
+| `PATCH/DELETE /api/v1/admin/releases/{id}` | admin | `{active, notes, channel, rollout_hours, halted, restart_rollout}` / delete |
 | `GET /api/v1/admin/releases/rings` | viewer | Release rings (staged rollouts) and their progress |
 | `PUT/DELETE /api/v1/admin/releases/rings/{tag}` | admin | `{release: "latest" \| "1.2.0"}` / remove |
 | `GET/POST/PATCH/DELETE /api/v1/admin/users[/{id}]` | admin | Console users. `PATCH {reset_2fa: true}` turns off someone's two-factor sign-in; `scope_tags: [..] \| null` limits a user to devices with those tags. |

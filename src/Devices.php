@@ -216,6 +216,8 @@ final class Devices
         'low_battery' => 'Low battery',
         'battery_hot' => 'Battery hot',
         'battery_health' => 'Battery failing',
+        'update_unhealthy' => 'Kiosky update crashing',
+        'wifi' => 'Wi-Fi settings not applied',
     ];
 
     /**
@@ -264,6 +266,18 @@ final class Devices
         $health = $state['battery_health'] ?? null;
         if (in_array($health, ['overheat', 'dead', 'over_voltage', 'failure'], true) && $d['online']) {
             $out['battery_health'] = 'battery reports ' . str_replace('_', ' ', (string) $health);
+        }
+        // Kiosky 1.8.0+: a version that crashed right after updating runs in safe mode until a newer one arrives
+        if (($state['safe_mode'] ?? false) === true || ($state['update_health'] ?? null) === 'unhealthy') {
+            $out['update_unhealthy'] = 'Kiosky ' . ($d['app_version'] ?? '') . ' keeps crashing (safe mode): it needs a newer release';
+        }
+        $wifi = $state['wifi_config'] ?? null;
+        if ($wifi === 'reverted') {
+            $out['wifi'] = 'new Wi-Fi settings didn\'t connect and were put back';
+        } elseif ($wifi === 'failed') {
+            $out['wifi'] = 'Android refused a Wi-Fi network from the policy';
+        } elseif ($wifi === 'not_device_owner') {
+            $out['wifi'] = 'Wi-Fi settings need Kiosky to be the device owner';
         }
         return $out;
     }

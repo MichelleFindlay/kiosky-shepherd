@@ -65,6 +65,40 @@ final class Policy
             'help' => 'Lets "choose file" buttons open Android\'s file picker. The picker is another app, so turn this off on locked-down public tablets that don\'t need it. Needs Kiosky 1.7.0 or later.',
         ],
 
+        'session.clear_on_idle' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Page',
+            'label' => 'Shared tablet: sign out when it goes back to the start page',
+            'help' => 'For tablets the public uses, such as visitor check-in. When the tablet returns to the start page after "Back to the start page after", it also clears cookies, saved site data, cache and history, so the next person isn\'t signed in as the last. Only if someone touched it since the last time. Needs Back to the start page set, and Kiosky 1.8.0 or later.',
+        ],
+
+        'offline.last_page' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Page',
+            'label' => 'While reconnecting, show the last page greyed out',
+            'help' => 'Instead of a full "Reconnecting…" screen, a greyed-out picture of the last page that loaded properly, with a small banner. Never kept of a shared tablet\'s other pages. Needs Kiosky 1.8.0 or later.',
+        ],
+
+        // --- Touch and scanners (Kiosky 1.8.0+) -------------------------------------
+        'touch.zoom' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Touch and scanners', 'label' => 'Pinch to zoom',
+            'help' => 'Off, a stray two-finger touch can\'t leave the page zoomed in. Needs Kiosky 1.8.0 or later.',
+        ],
+        'touch.long_press' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Touch and scanners', 'label' => 'Long press',
+            'help' => 'Off, pressing and holding does nothing: no text selection with its Copy/Share/Search menu (which can lead to other apps), no link previews, and no paste menu in text boxes.',
+        ],
+        'touch.text_selection' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Touch and scanners', 'label' => 'Selecting the page\'s text',
+            'help' => 'Off, the page\'s text can\'t be highlighted. Text boxes still work.',
+        ],
+        'input.nfc' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Touch and scanners', 'label' => 'Read NFC tags',
+            'help' => 'While Kiosky is in front, tags held to the tablet go to the page (kiosky:nfc events) and to MQTT, and can\'t open other apps. For check-in and attendance pages.',
+        ],
+        'input.barcode' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Touch and scanners', 'label' => 'Barcode scanners',
+            'help' => 'USB and Bluetooth scanners that type like a keyboard: each scan also goes to the page (kiosky:barcode events) and to MQTT.',
+        ],
+
         // --- Sign-in and certificates (Kiosky 1.7.0+) ------------------------------
         'http_auth.host' => [
             'type' => 'string', 'max' => 253, 'default' => '', 'group' => 'Sign-in and certificates',
@@ -95,6 +129,52 @@ final class Policy
         'media.microphone' => [
             'type' => 'bool', 'default' => true, 'group' => 'Camera and microphone',
             'label' => 'Pages may use the microphone', 'help' => 'For two-way audio. Same sites as the camera.',
+        ],
+
+        // --- Home Assistant (MQTT) (Kiosky 1.8.0+) ---------------------------------
+        'mqtt.host' => [
+            'type' => 'host', 'default' => '', 'group' => 'Home Assistant (MQTT)', 'label' => 'MQTT broker',
+            'help' => 'Host name or IP address of an MQTT broker (such as Home Assistant\'s Mosquitto add-on), so a home server can see and control the tablet directly: screen, brightness, volume, page, announcements, motion and battery. Empty: off. Needs Kiosky 1.8.0 or later.',
+        ],
+        'mqtt.port' => [
+            'type' => 'int', 'min' => 1, 'max' => 65535, 'default' => 1883, 'group' => 'Home Assistant (MQTT)',
+            'label' => 'Port', 'help' => 'Usually 1883, or 8883 with TLS.',
+        ],
+        'mqtt.tls' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Home Assistant (MQTT)', 'label' => 'Use TLS', 'help' => 'Encrypts the connection. Set the port too (usually 8883).',
+        ],
+        'mqtt.fingerprint' => [
+            'type' => 'fingerprint', 'default' => '', 'group' => 'Home Assistant (MQTT)', 'label' => 'Broker certificate (SHA-256)',
+            'help' => 'For a broker with a self-signed certificate: its SHA-256 fingerprint, trusted instead of the usual certificate checks. Empty: the certificate must be valid for the broker\'s name.',
+        ],
+        'mqtt.username' => [
+            'type' => 'string', 'max' => 200, 'default' => '', 'group' => 'Home Assistant (MQTT)', 'label' => 'Username', 'help' => '',
+        ],
+        'mqtt.password' => [
+            'type' => 'secret', 'max' => 200, 'default' => '', 'group' => 'Home Assistant (MQTT)', 'label' => 'Password',
+            'help' => 'Anyone who can publish to the broker can control the tablets, so give it a password. Never shown again here once saved.',
+        ],
+        'mqtt.topic' => [
+            'type' => 'topic', 'default' => '', 'group' => 'Home Assistant (MQTT)', 'label' => 'Base topic',
+            'help' => 'Empty: kiosky/ and the start of the tablet\'s Android ID. Set it per device (as an override) if you want readable topics; two tablets must not share one.',
+        ],
+        'mqtt.name' => [
+            'type' => 'string', 'max' => 100, 'default' => '', 'group' => 'Home Assistant (MQTT)', 'label' => 'Name in Home Assistant',
+            'help' => 'Empty: the device\'s name here.',
+        ],
+        'mqtt.discovery' => [
+            'type' => 'bool', 'default' => true, 'group' => 'Home Assistant (MQTT)', 'label' => 'Home Assistant discovery',
+            'help' => 'The tablet adds itself to Home Assistant as a device with its entities.',
+        ],
+        'mqtt.discovery_prefix' => [
+            'type' => 'topic', 'default' => 'homeassistant', 'group' => 'Home Assistant (MQTT)', 'label' => 'Discovery prefix',
+            'help' => 'Only change it if you changed it in Home Assistant.',
+        ],
+
+        // --- Wi-Fi (Kiosky 1.8.0+) -------------------------------------------------
+        'wifi.networks' => [
+            'type' => 'wifi', 'default' => [], 'group' => 'Wi-Fi', 'label' => 'Wi-Fi networks',
+            'help' => 'Saved on the tablets, so a new router or password doesn\'t need a visit. One per line: name | password | wpa2, wpa3 or open | hidden (the last two optional), the first preferred, at most 10. A changed password that doesn\'t connect within 10 minutes is put back. Leaving the list empty changes nothing on the tablets. Needs Kiosky 1.8.0 or later, as device owner on Android 10 and later; the device page shows wifi_config. Passwords are sent to the tablets and never shown here again: (saved) keeps one.',
         ],
 
         // --- Device -------------------------------------------------------------
@@ -188,6 +268,10 @@ final class Policy
             'type' => 'int', 'min' => 0, 'max' => 1440, 'default' => 0, 'group' => 'Screen schedule',
             'label' => 'Also dim after (minutes untouched)', 'help' => 'The first touch brightens it again without pressing anything. 0 turns this off.',
         ],
+        'screen.pixel_shift' => [
+            'type' => 'bool', 'default' => false, 'group' => 'Screen schedule', 'label' => 'Shift the page against burn-in',
+            'help' => 'Every few minutes the page moves a pixel or two along a tiny circle, so a dashboard shown all day doesn\'t burn into cheaper LCD and OLED screens. Needs Kiosky 1.8.0 or later.',
+        ],
         'screen.dim_brightness' => [
             'type' => 'int', 'min' => 1, 'max' => 100, 'default' => 15, 'group' => 'Screen schedule',
             'label' => 'Dimmed brightness (%)', 'help' => '',
@@ -242,6 +326,11 @@ final class Policy
         'updates.auto_install' => [
             'type' => 'bool', 'default' => true, 'group' => 'Updates', 'label' => 'Install without waiting',
             'help' => 'Start installing as soon as an update is found. Android may still show its own confirmation.',
+        ],
+        'updates.rollout_hours' => [
+            'type' => 'int', 'min' => 0, 'max' => 336, 'default' => 0, 'group' => 'Updates',
+            'label' => 'GitHub rollout spread (hours)',
+            'help' => 'Only used when the source is github: each tablet installs a new GitHub release at its own fixed point within this many hours after it\'s published, so a bad release can be pulled before most tablets have it. For the server source, set the spread on each release under Releases instead. 0: straight away. Needs Kiosky 1.8.0 or later.',
         ],
         'updates.check_hours' => [
             'type' => 'int', 'min' => 1, 'max' => 168, 'default' => 12, 'group' => 'Updates',
@@ -375,6 +464,48 @@ final class Policy
                 }
                 return array_keys($fps);
 
+            case 'host':
+                if (!is_string($v)) {
+                    $err = 'Must be text.';
+                    return null;
+                }
+                $v = trim($v);
+                if ($v !== '' && (strlen($v) > 253 || !preg_match('/^[A-Za-z0-9]([A-Za-z0-9.\-]*[A-Za-z0-9])?$|^[0-9A-Fa-f:]+$/', $v))) {
+                    $err = 'Enter just the host name or IP address, like 192.168.1.10 or mqtt.example.com.';
+                    return null;
+                }
+                return $v;
+
+            case 'fingerprint':
+                if (!is_string($v)) {
+                    $err = 'Must be text.';
+                    return null;
+                }
+                $hex = strtolower((string) preg_replace('/[^0-9a-fA-F]/', '', $v));
+                if (trim($v) === '') {
+                    return '';
+                }
+                if (strlen($hex) !== 64) {
+                    $err = 'A SHA-256 fingerprint has 64 hex digits, e.g. AB:12:….';
+                    return null;
+                }
+                return implode(':', str_split(strtoupper($hex), 2));
+
+            case 'topic':
+                if (!is_string($v)) {
+                    $err = 'Must be text.';
+                    return null;
+                }
+                $v = trim(trim($v), '/');
+                if (strlen($v) > 200 || preg_match('/[+#\x00-\x1F\x7F]/', $v)) {
+                    $err = 'Use at most 200 characters, without + or #.';
+                    return null;
+                }
+                return $v;
+
+            case 'wifi':
+                return self::normaliseWifi($v, $err);
+
             case 'time':
                 if (!is_string($v) || !preg_match('/^(([01]\d|2[0-3]):[0-5]\d)?$/', trim($v))) {
                     $err = 'Use a 24-hour time such as 22:00, or leave it empty.';
@@ -484,6 +615,97 @@ final class Policy
         return null;
     }
 
+    /** Marks a Wi-Fi password to keep from the stored settings (the console only ever sees "(saved)"). */
+    private const KEEP = ['keep' => true];
+
+    /**
+     * Wi-Fi networks, from a list of {ssid, password, security, hidden} or the console's
+     * text ("name | password | security | hidden", one per line).
+     *
+     * @return list<array{ssid: string, password: string|array{keep: true}, security: string, hidden: bool}>|null
+     */
+    private static function normaliseWifi(mixed $v, ?string &$err): ?array
+    {
+        if (is_string($v)) {
+            $rows = [];
+            foreach (preg_split('/\r\n|\r|\n/', $v) ?: [] as $line) {
+                if (trim($line) === '') {
+                    continue;
+                }
+                $parts = array_map('trim', explode('|', $line));
+                $rows[] = ['ssid' => $parts[0], 'password' => $parts[1] ?? '', 'security' => $parts[2] ?? '',
+                    'hidden' => in_array(strtolower($parts[3] ?? ''), ['hidden', 'yes', 'true', '1'], true)];
+            }
+            $v = $rows;
+        }
+        if (!is_array($v) || !array_is_list($v) || count($v) > 10) {
+            $err = 'Use up to 10 networks, one per line: name | password | security | hidden.';
+            return null;
+        }
+        $out = [];
+        $seen = [];
+        foreach ($v as $n) {
+            $ssid = is_array($n) && is_string($n['ssid'] ?? null) ? $n['ssid'] : '';
+            if ($ssid === '' || strlen($ssid) > 32 || preg_match('/[\x00-\x1F\x7F|]/', $ssid)) {
+                $err = 'Each network needs a name of 1 to 32 bytes, without |: ' . Util::clip($ssid, 40);
+                return null;
+            }
+            if (isset($seen[$ssid])) {
+                $err = "$ssid is listed twice.";
+                return null;
+            }
+            $seen[$ssid] = true;
+            $pw = $n['password'] ?? '';
+            $keep = (is_array($pw) && (($pw['set'] ?? null) === true || ($pw['keep'] ?? null) === true)) || $pw === '(saved)';
+            if (!$keep && !is_string($pw)) {
+                $err = "The password for $ssid must be text.";
+                return null;
+            }
+            $security = strtolower(is_string($n['security'] ?? null) ? trim($n['security']) : '');
+            if ($security === '') {
+                $security = !$keep && $pw === '' ? 'open' : 'wpa2';
+            }
+            if (!in_array($security, ['open', 'wpa2', 'wpa3'], true)) {
+                $err = "Security for $ssid must be wpa2, wpa3 or open.";
+                return null;
+            }
+            if ($security === 'open') {
+                $pw = '';
+            } elseif (!$keep && !(strlen($pw) >= 8 && strlen($pw) <= 63) && !preg_match('/^[0-9A-Fa-f]{64}$/', $pw)) {
+                $err = "The password for $ssid must be 8 to 63 characters (or 64 hex digits).";
+                return null;
+            }
+            $hidden = $n['hidden'] ?? false;
+            $out[] = ['ssid' => $ssid, 'password' => $keep && $security !== 'open' ? self::KEEP : $pw,
+                'security' => $security, 'hidden' => $hidden === true];
+        }
+        return $out;
+    }
+
+    /**
+     * Fills in Wi-Fi passwords marked "keep" from the stored list (same network name).
+     *
+     * @throws Http\HttpError when there's no stored password to keep
+     */
+    private static function keepWifiPasswords(string $key, array $networks, mixed $stored): array
+    {
+        $old = [];
+        foreach (is_array($stored) ? $stored : [] as $n) {
+            if (is_array($n) && is_string($n['ssid'] ?? null) && is_string($n['password'] ?? null)) {
+                $old[$n['ssid']] = $n['password'];
+            }
+        }
+        foreach ($networks as $i => $n) {
+            if ($n['password'] === self::KEEP) {
+                if (!isset($old[$n['ssid']]) || $old[$n['ssid']] === '') {
+                    throw Http\HttpError::validation([$key => "Enter the password for {$n['ssid']} (there's no saved one to keep here)."]);
+                }
+                $networks[$i]['password'] = $old[$n['ssid']];
+            }
+        }
+        return $networks;
+    }
+
     /** PBKDF2 so the device can check a PIN offline without the server holding it in clear. */
     public static function hashPin(string $pin): array
     {
@@ -515,6 +737,9 @@ final class Policy
     public static function apply(array $stored, array $changes): array
     {
         foreach ($changes as $k => $v) {
+            if (is_array($v) && (self::SCHEMA[$k]['type'] ?? null) === 'wifi') {
+                $v = self::keepWifiPasswords((string) $k, $v, $stored[$k] ?? null);
+            }
             if ($v === null) {
                 unset($stored[$k]);
             } else {
@@ -638,6 +863,12 @@ final class Policy
                 $flat[$key] = ['set' => true];
             } elseif ($def['type'] === 'secret' && isset($flat[$key]) && is_string($flat[$key]) && $flat[$key] !== '') {
                 $flat[$key] = ['set' => true];
+            } elseif ($def['type'] === 'wifi' && isset($flat[$key]) && is_array($flat[$key])) {
+                foreach ($flat[$key] as $i => $n) {
+                    if (is_array($n) && is_string($n['password'] ?? null) && $n['password'] !== '') {
+                        $flat[$key][$i]['password'] = ['set' => true];
+                    }
+                }
             }
         }
         return $flat;
