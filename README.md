@@ -196,10 +196,12 @@ There is no database change. PHP needs write access to `storage/` to save settin
 It also adds CIDR ranges and the `cloudflare` / `private` presets to `trusted_proxies`,
 `client_ip_header`, and **Server → Network** (see [Reverse proxies and Cloudflare](#reverse-proxies-and-cloudflare)).
 
-**Next release** adds `sql/migrations/006_operations.sql` (applied automatically),
-`admin/sw.js` and `admin/manifest.webmanifest`. With alerts set up, page errors,
-escapable lockdown and low battery are now reported too; untick them under
-Server → Settings → Alerts if you only want offline alerts.
+**1.7.0** adds `sql/migrations/006_operations.sql` (applied automatically),
+`admin/sw.js`, `admin/manifest.webmanifest`, `src/Api/ProvisioningApi.php` and
+`blueprints/`. With alerts set up, page errors, escapable lockdown, low battery and
+hot or failing batteries are now reported too; untick them under
+Server → Settings → Alerts if you only want offline alerts. Uploading files by
+hand: copy every file, as usual, keeping `config/config.php` and `storage/`.
 
 **1.5.0** adds `sql/migrations/005_release_channels.sql` (applied automatically)
 and the **Release channel** policy setting, so device policies change once more.
